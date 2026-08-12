@@ -3,8 +3,10 @@
 #include "fh6r/safe_mem.hpp"
 #include <windows.h>
 #include <atomic>
+#include <cstddef>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <string_view>
 
 namespace fh6r::fmod {
@@ -91,17 +93,37 @@ std::vector<std::byte*> scan_heap(const PEImage& img, const std::byte* vtable) n
     }
     return out;
 }
-std::string read_sound_name(std::byte* stream, int* step, std::byte** body) noexcept {
-    if (step) *step = 0;
-    if (body) *body = nullptr;
-    std::byte* a{}; if (!safe_read(stream + 0x48, a) || !a) return {};
-    if (step) *step = 1;
-    std::byte* b{}; if (!safe_read(a + 0x18, b) || !b) return {};
-    if (step) *step = 2;
-    if (body) *body = b;
+std::string read_string_field(std::byte* field) noexcept {
+    if (!field) return {};
     std::string out;
-    seh_call([&] { if (auto s = safe_read_msvc_string(b + 0x10)) out = std::move(*s); });
+    seh_call([&] { if (auto s = safe_read_msvc_string(field, 512)) out = std::move(*s); });
     return out;
+}
+
+struct ChainProbe {
+    int step = 0;
+    std::byte* first = nullptr;
+    std::byte* body = nullptr;
+    std::string slot10;
+    std::string slot30;
+    std::string slot50;
+};
+
+ChainProbe probe_chain(std::byte* stream, std::ptrdiff_t first_offset,
+                       std::ptrdiff_t second_offset) noexcept {
+    ChainProbe p;
+    if (!stream || !safe_read(stream + first_offset, p.first) || !p.first) return p;
+    p.step = 1;
+    if (!safe_read(p.first + second_offset, p.body) || !p.body) return p;
+    p.step = 2;
+    p.slot10 = read_string_field(p.body + 0x10);
+    p.slot30 = read_string_field(p.body + 0x30);
+    p.slot50 = read_string_field(p.body + 0x50);
+    return p;
+}
+
+bool looks_like_event_name(std::string_view s) noexcept {
+    return s.starts_with("HZ6_");
 }
 struct Cache {
     bool located = false;
@@ -113,7 +135,9 @@ struct Cache {
 };
 std::mutex g_mu;
 Cache g_cache;
-constexpr int kRescanThreshold = 20;
+// The controller retries roughly once per second while detached. Avoid repeated
+// full-process heap scans when a game update invalidates the metadata chain.
+constexpr int kRescanThreshold = 90;
 }
 
 void* resolve_fmod_system(const PEImage& img, std::byte* stream) noexcept {
@@ -156,18 +180,61 @@ DiscoveryResult discover_radio_instances(const PEImage& img) noexcept {
         { std::scoped_lock lk{g_mu}; g_cache = local; }
         log::info("[radio] cached {} RadioStreamFmod candidate(s)", local.candidates.size());
     }
-    for (auto* rc : local.candidates) {
-        std::byte* body{}; int step = 0;
-        auto* stream = rc + 16;
-        auto name = read_sound_name(stream, &step, &body);
-        if (!name.empty()) result.instances.push_back({rc, stream, body, std::move(name)});
-    }
     result.vtable = local.vtable;
+    const bool emit_probe = local.empty_streak == 0;
+    std::size_t index = 0;
+    for (auto* rc : local.candidates) {
+        auto* stream = rc + 16;
+        std::byte* fmod_sound = nullptr;
+        safe_read(rc + 0x18, fmod_sound);
+
+        // Layout A: verified by ForzaRadioprobe on an earlier FH6 build.
+        const auto legacy = probe_chain(stream, 0x48, 0x18);
+        // Layout B: used by HorizonRadio after a later FH6 update.
+        const auto modern = probe_chain(stream, 0x50, 0x08);
+
+        int score = fmod_sound ? 40 : 0;
+        if (legacy.step == 2 || modern.step == 2) score += 20;
+        if (looks_like_event_name(legacy.slot10) || looks_like_event_name(modern.slot10)) score += 40;
+        else if (!legacy.slot30.empty() || !modern.slot30.empty()) score += 20;
+
+        if (emit_probe) {
+            log::info("[radio-probe] #{} score={} rc=0x{:X} stream=0x{:X} fmod_sound=0x{:X}",
+                      index, score,
+                      reinterpret_cast<std::uintptr_t>(rc),
+                      reinterpret_cast<std::uintptr_t>(stream),
+                      reinterpret_cast<std::uintptr_t>(fmod_sound));
+            log::info("[radio-probe] #{} legacy step={} first=0x{:X} body=0x{:X} +10=\"{}\" +30=\"{}\" +50=\"{}\"",
+                      index, legacy.step,
+                      reinterpret_cast<std::uintptr_t>(legacy.first),
+                      reinterpret_cast<std::uintptr_t>(legacy.body),
+                      legacy.slot10, legacy.slot30, legacy.slot50);
+            log::info("[radio-probe] #{} modern step={} first=0x{:X} body=0x{:X} +10=\"{}\" +30=\"{}\" +50=\"{}\"",
+                      index, modern.step,
+                      reinterpret_cast<std::uintptr_t>(modern.first),
+                      reinterpret_cast<std::uintptr_t>(modern.body),
+                      modern.slot10, modern.slot30, modern.slot50);
+        }
+
+        // Diagnostic build stays fail-closed: only expose a candidate to the
+        // controller when a real HZ6 event-style SoundName is present.
+        if (looks_like_event_name(legacy.slot10)) {
+            result.instances.push_back({rc, stream, legacy.body, legacy.slot10});
+        } else if (looks_like_event_name(modern.slot10)) {
+            result.instances.push_back({rc, stream, modern.body, modern.slot10});
+        }
+        ++index;
+    }
     if (result.instances.empty()) {
         local.empty_streak++;
         std::scoped_lock lk{g_mu};
-        if (local.empty_streak >= kRescanThreshold) g_cache = Cache{};
-        else g_cache.empty_streak = local.empty_streak;
+        if (local.empty_streak >= kRescanThreshold) {
+            log::info("[radio] candidates stayed chain-invalid for {} retries; dropping cache for a fresh heap scan",
+                      kRescanThreshold);
+            g_cache = Cache{};
+        } else {
+            g_cache.empty_streak = local.empty_streak;
+        }
     } else {
         std::scoped_lock lk{g_mu}; g_cache.empty_streak = 0;
     }

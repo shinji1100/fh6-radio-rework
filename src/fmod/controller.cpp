@@ -70,9 +70,9 @@ void Controller::run(std::stop_token stop) noexcept {
         // radio stream: attaching to the wrong instance would overwrite a native
         // station. If the carrier is absent, the dashboard tells the user to cycle
         // the in-game radio instead.
-        if (now >= next_discovery || !bridge_.stats().attached) {
+        if (now >= next_discovery) {
             discover_target();
-            next_discovery = now + (bridge_.stats().attached ? 2s : 750ms);
+            next_discovery = now + (bridge_.stats().attached ? 2s : 1s);
         }
         std::this_thread::sleep_for(100ms);
     }
