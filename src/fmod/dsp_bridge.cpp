@@ -130,6 +130,11 @@ void DSPBridge::set_target(const RadioInstance& inst, void* system) noexcept {
     stream_ = inst.radio_stream;
     system_ = system;
 }
+void DSPBridge::clear_target() noexcept {
+    detach();
+    stream_ = nullptr;
+    system_ = nullptr;
+}
 void DSPBridge::retarget_if_needed() noexcept {
     if (!stream_ || !system_) return;
     const auto h = live_handle(stream_);

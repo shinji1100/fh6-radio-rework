@@ -202,7 +202,7 @@ async function devices(){const d=await api('/api/devices');const sel=$('device')
 async function refresh(){try{state=await api('/api/state');$('capture').textContent=state.capture.running?'运行中':(state.capture.worker_alive?'初始化中':(state.capture.last_error?'错误':'已停止'));$('capture').className=state.capture.running?'ok':'';
  $('dsp').textContent=state.dsp.attached?'已接入 FH6':'未接入';$('dsp').className=state.dsp.attached?'ok':'';$('format').textContent=state.capture.input_rate?`${state.capture.input_channels} ch / ${state.capture.input_rate} Hz`:'—';
  $('buffer').textContent=`${state.ring.readable_frames} / ${state.ring.capacity_frames} 帧`;$('error').textContent=state.capture.last_error||'';
- $('hint').textContent=state.controller.target_found?(state.dsp.attached?'已找到 Streamer Mode 载体并挂载 DSP。':'已找到载体，等待有效 FMOD channel。'):'尚未找到目标电台。请在 FH6 开启 Streamer Mode，并切换/循环一次电台。';
+ $('hint').textContent=!state.controller.streamer_mode?(state.controller.station_name?`当前电台：${state.controller.station_name}。请切换到 Streamer Mode。`:'尚未识别电台状态，请确认 FH6 已进入可驾驶场景并启用 Streamer Mode。'):(state.controller.target_found?(state.dsp.attached?`已自动锁定 ${state.controller.sound_name||'当前 Streamer Mode 音轨'} 并挂载 DSP。`:'已找到 active stream，等待有效 FMOD channel。'):'Streamer Mode 已识别，正在等待 active radio stream。');
  $('gain').value=Math.round(state.config.gain*100);$('gainText').textContent=Math.round(state.config.gain*100)+'%';$('stereo').checked=state.config.native_stereo;
  $('diag').textContent=`设备: ${state.capture.device_name||'—'} · 捕获包: ${state.capture.packets} · 捕获帧: ${state.capture.frames_captured} · discontinuity: ${state.capture.discontinuities} · ring overflow: ${state.ring.overflow_frames} · DSP underrun: ${state.dsp.underrun_frames} · rebuffer: ${state.dsp.rebuffer_events} · callbacks: ${state.dsp.callbacks}`;
  }catch(e){$('error').textContent=String(e)}}
@@ -257,6 +257,8 @@ struct HttpServer::Impl {
           << ",\"underrun_frames\":" << ds.underrun_frames << ",\"rebuffer_events\":" << ds.rebuffer_events
           << ",\"primed\":" << (ds.primed?"true":"false") << ",\"last_frames\":" << ds.last_frames
           << ",\"last_channels\":" << ds.last_channels << "},\"controller\":{\"target_found\":" << (cs.target_found?"true":"false")
+          << ",\"streamer_mode\":" << (cs.streamer_mode?"true":"false")
+          << ",\"station_name\":\"" << json_escape(cs.station_name) << "\""
           << ",\"sound_name\":\"" << json_escape(cs.sound_name) << "\"}}";
         return o.str();
     }

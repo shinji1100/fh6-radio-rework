@@ -24,4 +24,11 @@ Substantially rewritten areas in this branch include:
 - localhost-only Chinese dashboard and diagnostics
 - simplified controller architecture
 
+Additional runtime-station targeting references were consulted from:
+
+- Project: `dhkatz/HorizonRadio`
+- Snapshot: `31719897e4958dcbf5497f90841c917785f82238`
+- License: GNU General Public License v3.0
+- Referenced area: FH6 `RadioState` station-selection signature and station-name pointer chain
+
 See `LICENSE` for GPL-3.0 terms.

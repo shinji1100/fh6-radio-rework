@@ -219,9 +219,9 @@ DiscoveryResult discover_radio_instances(const PEImage& img) noexcept {
         // Diagnostic build stays fail-closed: only expose a candidate to the
         // controller when a real HZ6 event-style SoundName is present.
         if (looks_like_event_name(legacy.slot10)) {
-            result.instances.push_back({rc, stream, legacy.body, legacy.slot10});
+            result.instances.push_back({rc, stream, fmod_sound, legacy.body, legacy.slot10});
         } else if (looks_like_event_name(modern.slot10)) {
-            result.instances.push_back({rc, stream, modern.body, modern.slot10});
+            result.instances.push_back({rc, stream, fmod_sound, modern.body, modern.slot10});
         }
         ++index;
     }

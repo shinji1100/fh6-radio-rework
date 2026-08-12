@@ -1,7 +1,6 @@
 #pragma once
 #include "fh6r/fmod/dsp_bridge.hpp"
 #include "fh6r/fmod/pe_image.hpp"
-#include <atomic>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -10,6 +9,8 @@ namespace fh6r::fmod {
 struct ControllerStats {
     bool target_found = false;
     bool dsp_attached = false;
+    bool streamer_mode = false;
+    std::string station_name;
     std::string sound_name;
 };
 
@@ -23,12 +24,18 @@ public:
 private:
     void run(std::stop_token stop) noexcept;
     bool discover_target() noexcept;
+    bool refresh_station_gate() noexcept;
+    void clear_target_state() noexcept;
 
     DSPBridge& bridge_;
     const PEImage& image_;
-    std::jthread thread_;
     mutable std::mutex mu_;
     bool target_found_ = false;
+    bool streamer_mode_ = false;
+    std::string station_name_;
     std::string sound_name_;
+    void** radio_state_slot_ = nullptr;
+    int radio_state_retry_ticks_ = 0;
+    std::jthread thread_;
 };
 } // namespace fh6r::fmod

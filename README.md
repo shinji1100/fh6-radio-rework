@@ -18,7 +18,7 @@
 - FMOD 回调**绝不增加**游戏分配的输出声道数。
 - 默认使用 mono 内容复制到 FMOD 已分配的全部声道，规避 3D radio panner 的相位问题。
 - 只绑定 `127.0.0.1` 的中文控制台，不向局域网暴露配置接口。
-- 仅精确匹配 Streamer Mode carrier；找不到时不再回退到任意原版电台实例。
+- 通过 RadioState 确认当前选择的是 Streamer Mode，再自动锁定唯一 active `RadioStreamFmod`；不再写死某一首 carrier。
 
 ## 暂时移除
 
@@ -31,7 +31,7 @@
 1. 从 GitHub Actions 的 `fh6-radio-rework` artifact 取得 `version.dll`。
 2. 将 `version.dll` 放到 `forzahorizon6.exe` 同目录。
 3. 启动游戏后打开 `http://127.0.0.1:8420`。
-4. FH6 中启用 **Streamer Mode**，关闭 **Radio DJ**，并切换/循环一次电台，直到控制台显示 `FH6 DSP 已接入`。
+4. FH6 中启用 **Streamer Mode**，关闭 **Radio DJ**，并选择 Streamer Mode 电台；插件会自动锁定当前 active radio stream，直到控制台显示 `FH6 DSP 已接入`。
 5. 在 Windows 音量混合器中，把 QQ 音乐输出设为一个独立播放设备，例如 `CABLE Input (VB-Audio Virtual Cable)`。
 6. 在控制台选择同一个播放设备并点击“应用设备并重启捕获”。
 
@@ -74,7 +74,7 @@ dashboard_port=8420
 - WASAPI 是否运行、输入采样率/声道数
 - 捕获包数量、discontinuity、event timeout
 - SPSC ring 当前填充与 overflow
-- Streamer Mode carrier 是否找到
+- 当前 Station 是否为 Streamer Mode，以及 active radio stream 是否找到
 - DSP 是否成功挂到 FMOD channel
 - mixer callback 次数与 underrun frame 数
 

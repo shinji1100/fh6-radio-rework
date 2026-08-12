@@ -33,10 +33,13 @@ ring requests a consumer-side reset, so long pauses do not resume with stale aud
 
 ## Runtime discovery
 
-The low-level discovery layer is derived from `g0ldyy/fh6-universal-radio` and resolves the
-known Streamer Mode carrier at runtime. The controller only accepts the exact carrier
-`HZ6_R9_PeterBroderick_EyesClosedandTraveling`; there is deliberately no fallback to an
-arbitrary native radio instance.
+The low-level discovery layer is derived from `g0ldyy/fh6-universal-radio`. The controller
+first resolves the FH6 `RadioState` global and requires the selected station name to be exactly
+`Streamer Mode`. It then scans `RadioStreamFmod` RTTI instances and accepts only the single
+candidate that has a non-null FMOD sound, a live channel handle and a resolvable FMOD System.
+There is no hard-coded song/carrier name and no fallback to an idle or arbitrary native radio
+instance. If the station gate fails or multiple live candidates are visible, the DSP target is
+cleared and the controller fails closed.
 
 ## Dashboard
 

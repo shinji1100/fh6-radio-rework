@@ -7,6 +7,7 @@ namespace fh6r::fmod {
 struct RadioInstance {
     std::byte* refcount_obj = nullptr;
     std::byte* radio_stream = nullptr;
+    std::byte* fmod_sound = nullptr;
     std::byte* sample_props_body = nullptr;
     std::string sound_name;
 };

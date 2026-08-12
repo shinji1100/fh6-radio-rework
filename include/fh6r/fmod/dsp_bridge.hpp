@@ -43,6 +43,7 @@ public:
     DSPBridge& operator=(const DSPBridge&) = delete;
 
     void set_target(const RadioInstance& inst, void* system) noexcept;
+    void clear_target() noexcept;
     void retarget_if_needed() noexcept;
     bool channel_alive(std::byte* stream) const noexcept;
     void detach() noexcept;
