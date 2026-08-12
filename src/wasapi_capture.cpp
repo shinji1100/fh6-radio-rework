@@ -3,9 +3,9 @@
 #include "fh6r/drift_control.hpp"
 
 #include <windows.h>
+#include <propidl.h>
 #include <propkeydef.h>
 #include <propsys.h>
-#include <propidl.h>
 #include <audioclient.h>
 #include <avrt.h>
 #include <functiondiscoverykeys_devpkey.h>
