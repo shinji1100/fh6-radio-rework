@@ -1,0 +1,7 @@
+/build/
+/out/
+*.user
+*.suo
+*.vcxproj*
+*.log
+.DS_Store

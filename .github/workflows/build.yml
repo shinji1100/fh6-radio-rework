@@ -1,0 +1,49 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Configure portable tests
+        run: cmake -S . -B build-portable -DFH6R_PORTABLE_TESTS_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+      - name: Build portable tests
+        run: cmake --build build-portable --parallel
+      - name: Run portable tests
+        run: ctest --test-dir build-portable --output-on-failure
+      - name: Static safety audit
+        run: python3 tests/static_audit.py
+
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Stage package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/fh6-radio-rework | Out-Null
+          Copy-Item build/Release/version.dll dist/fh6-radio-rework/version.dll
+          Copy-Item README.md dist/fh6-radio-rework/README.md
+          Copy-Item config.example.ini dist/fh6-radio-rework/config.example.ini
+          Copy-Item LICENSE dist/fh6-radio-rework/LICENSE
+          Copy-Item NOTICE.md dist/fh6-radio-rework/NOTICE.md
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fh6-radio-rework-windows-x64
+          path: dist/fh6-radio-rework
+          if-no-files-found: error
