@@ -35,6 +35,7 @@ add_library(version SHARED
   src/log.cpp
   src/config.cpp
   src/audio_ring.cpp
+  src/audio_state_probe.cpp
   src/wasapi_capture.cpp
   src/http/http_server.cpp
   src/fmod/pe_image.cpp

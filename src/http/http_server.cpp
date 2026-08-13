@@ -1,5 +1,6 @@
 #include "fh6r/http/http_server.hpp"
 #include "fh6r/audio_ring.hpp"
+#include "fh6r/audio_state_probe.hpp"
 #include "fh6r/config.hpp"
 #include "fh6r/fmod/controller.hpp"
 #include "fh6r/fmod/dsp_bridge.hpp"
@@ -16,6 +17,8 @@
 #include <cmath>
 #include <cctype>
 #include <cstdio>
+#include <fstream>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -193,6 +196,9 @@ label{display:block;margin:12px 0 6px;color:#abb5bf}select,input[type=range]{wid
 <label class="row"><input id="stereo" type="checkbox"> 原生双声道（实验性）</label>
 <p class="muted">默认关闭。关闭时保留 FMOD 原本的缓冲区声道结构，但向各声道写入同一个 mono 样本，避免 3D 电台通道的相位问题。</p></section>
 <section class="card"><h2>诊断</h2><div id="diag" class="muted">—</div></section>
+<section class="card"><h2>音频状态探测</h2>
+<div class="row"><button id="saveCockpit">存为 cockpit</button><button id="saveChase">存为 chase</button><button id="compare">对比 cockpit/chase</button></div>
+<div id="probe" class="muted">—</div><div id="cmp" class="muted"></div></section>
 </main><script>
 const $=id=>document.getElementById(id);let state=null;
 async function api(path,opt){const r=await fetch(path,opt);if(!r.ok)throw new Error(await r.text());const t=await r.text();return t?JSON.parse(t):{};}
@@ -210,7 +216,11 @@ $('refresh').onclick=async()=>{await devices();await refresh()};$('apply').oncli
 $('start').onclick=async()=>{await api('/api/capture/start',{method:'POST'});await refresh()};$('stop').onclick=async()=>{await api('/api/capture/stop',{method:'POST'});await refresh()};
 $('gain').oninput=()=>{$('gainText').textContent=$('gain').value+'%'};$('gain').onchange=async()=>{await api('/api/gain',{method:'POST',headers:{'Content-Type':'text/plain'},body:String(Number($('gain').value)/100)});await refresh()};
 $('stereo').onchange=async()=>{await api('/api/stereo',{method:'POST',headers:{'Content-Type':'text/plain'},body:$('stereo').checked?'1':'0'});await refresh()};
-(async()=>{await refresh();await devices();setInterval(refresh,1000)})();
+async function refreshProbe(){try{const p=await api('/api/probe/state');let t=p.attached?('已挂载 handle=0x'+p.channel_handle.toString(16)+' · listener '+(p.listener.valid?('fwd=('+p.listener.fwd.map(x=>x.toFixed(2)).join(',')+') up=('+p.listener.up.map(x=>x.toFixed(2)).join(',')+')'):'无效')):'未挂载';if(p.dsps&&p.dsps.length){t+=' · DSP:';p.dsps.forEach((d,i)=>{t+=' ['+i+']type='+d.type+' params=['+d.params.slice(0,d.num_params).map(x=>x.toFixed(2)).join(',')+']';});}$('probe').textContent=t;}catch(e){$('probe').textContent=String(e)}}
+$('saveCockpit').onclick=async()=>{await api('/api/probe/snapshot',{method:'POST',headers:{'Content-Type':'text/plain'},body:'cockpit'});await refreshProbe()};
+$('saveChase').onclick=async()=>{await api('/api/probe/snapshot',{method:'POST',headers:{'Content-Type':'text/plain'},body:'chase'});await refreshProbe()};
+$('compare').onclick=async()=>{try{const c=await api('/api/probe/compare',{method:'POST',headers:{'Content-Type':'text/plain'},body:'cockpit,chase'});$('cmp').textContent=c.changes&&c.changes.length?('变化: '+JSON.stringify(c.changes)):(c.error||'无变化');}catch(e){$('cmp').textContent=String(e)}};
+(async()=>{await refresh();await devices();refreshProbe();setInterval(refresh,1000);setInterval(refreshProbe,1000)})();
 </script></body></html>)HTML";
 }
 
@@ -220,15 +230,17 @@ struct HttpServer::Impl {
     WasapiCapture& capture;
     fmod::DSPBridge& dsp;
     fmod::Controller& controller;
+    AudioStateProbe& probe;
     std::uint16_t requested_port;
     std::atomic<std::uint16_t>* published_port;
     std::atomic<bool> stopping{false};
     std::atomic<SOCKET> server{INVALID_SOCKET};
     std::thread thread;
+    std::map<std::string, AudioStateSnapshot> saved;
 
     Impl(std::uint16_t p, ConfigStore& c, AudioRing& r, WasapiCapture& cap,
-         fmod::DSPBridge& d, fmod::Controller& ctl, std::atomic<std::uint16_t>* pub)
-        : config{c}, ring{r}, capture{cap}, dsp{d}, controller{ctl}, requested_port{p}, published_port{pub},
+         fmod::DSPBridge& d, fmod::Controller& ctl, AudioStateProbe& pr, std::atomic<std::uint16_t>* pub)
+        : config{c}, ring{r}, capture{cap}, dsp{d}, controller{ctl}, probe{pr}, requested_port{p}, published_port{pub},
           thread{[this] { run(); }} {}
     ~Impl() {
         stopping.store(true, std::memory_order_release);
@@ -274,6 +286,99 @@ struct HttpServer::Impl {
         o << "]}"; return o.str();
     }
 
+    std::string probe_state_json() {
+        const auto s = probe.snapshot();
+        std::ostringstream o;
+        o << "{\"attached\":" << (s.attached ? "true" : "false")
+          << ",\"channel_handle\":" << s.channel_handle
+          << ",\"taken_ms\":" << s.taken_ms
+          << ",\"listener\":{\"valid\":" << (s.listener.valid ? "true" : "false");
+        if (s.listener.valid) {
+            o << ",\"pos\":[" << s.listener.pos.x << ',' << s.listener.pos.y << ',' << s.listener.pos.z << ']'
+              << ",\"fwd\":[" << s.listener.fwd.x << ',' << s.listener.fwd.y << ',' << s.listener.fwd.z << ']'
+              << ",\"up\":[" << s.listener.up.x << ',' << s.listener.up.y << ',' << s.listener.up.z << ']';
+        }
+        o << "},\"dsps\":[";
+        for (std::size_t i = 0; i < s.dsps.size(); ++i) {
+            if (i) o << ',';
+            const auto& d = s.dsps[i];
+            o << "{\"type\":" << d.type << ",\"num_params\":" << d.num_params << ",\"params\":[";
+            for (std::int32_t k = 0; k < d.num_params && k < 16; ++k) {
+                if (k) o << ',';
+                o << d.params[k];
+            }
+            o << "]}";
+        }
+        o << "]}";
+        return o.str();
+    }
+
+    std::string save_probe_snapshot(const std::string& name) {
+        if (name.empty() || name.find_first_of("/\\.") != std::string::npos)
+            return "{\"error\":\"invalid name\"}";
+        const auto s = probe.snapshot();
+        saved[name] = s;
+        std::error_code ec;
+        std::ofstream f(config.path().parent_path() / (name + ".json"), std::ios::binary | std::ios::trunc);
+        if (f) f << probe_state_json();
+        return "{\"saved\":\"" + json_escape(name) + "\"}";
+    }
+
+    std::string compare_probe(const std::string& a, const std::string& b) {
+        auto ia = saved.find(a), ib = saved.find(b);
+        if (ia == saved.end() || ib == saved.end()) return "{\"error\":\"unknown snapshot\"}";
+        const auto& A = ia->second;
+        const auto& B = ib->second;
+        std::ostringstream o;
+        o << "{\"a\":\"" << json_escape(a) << "\",\"b\":\"" << json_escape(b) << "\",\"changes\":[";
+        bool first = true;
+        auto sep = [&] { if (!first) o << ','; first = false; };
+        auto vec_changed = [](const fmod::FMOD_VEC& x, const fmod::FMOD_VEC& y) {
+            return std::abs(x.x - y.x) > 0.001f || std::abs(x.y - y.y) > 0.001f || std::abs(x.z - y.z) > 0.001f;
+        };
+        auto dump_vec = [&](const fmod::FMOD_VEC& v) {
+            o << '[' << v.x << ',' << v.y << ',' << v.z << ']';
+        };
+        if (A.listener.valid && B.listener.valid) {
+            if (vec_changed(A.listener.fwd, B.listener.fwd)) {
+                sep(); o << "{\"field\":\"listener.fwd\",\"a\":"; dump_vec(A.listener.fwd); o << ",\"b\":"; dump_vec(B.listener.fwd); o << '}';
+            }
+            if (vec_changed(A.listener.up, B.listener.up)) {
+                sep(); o << "{\"field\":\"listener.up\",\"a\":"; dump_vec(A.listener.up); o << ",\"b\":"; dump_vec(B.listener.up); o << '}';
+            }
+        } else if (A.listener.valid != B.listener.valid) {
+            sep(); o << "{\"field\":\"listener.valid\",\"a\":" << (A.listener.valid ? "true" : "false")
+                     << ",\"b\":" << (B.listener.valid ? "true" : "false") << '}';
+        }
+        const std::size_t max_dsps = std::max(A.dsps.size(), B.dsps.size());
+        for (std::size_t i = 0; i < max_dsps; ++i) {
+            if (i >= A.dsps.size() || i >= B.dsps.size()) {
+                sep(); o << "{\"field\":\"dsp[" << i << "].present\",\"a\":"
+                         << (i < A.dsps.size() ? "true" : "false") << ",\"b\":"
+                         << (i < B.dsps.size() ? "true" : "false") << '}';
+                continue;
+            }
+            const auto& da = A.dsps[i];
+            const auto& db = B.dsps[i];
+            if (da.type != db.type) {
+                sep(); o << "{\"field\":\"dsp[" << i << "].type\",\"a\":" << da.type << ",\"b\":" << db.type << '}';
+            }
+            const int np = std::min(da.num_params, db.num_params);
+            for (int k = 0; k < np; ++k) {
+                if (std::abs(da.params[k] - db.params[k]) > 0.001f) {
+                    sep(); o << "{\"field\":\"dsp[" << i << "].param[" << k << "]\",\"a\":" << da.params[k]
+                             << ",\"b\":" << db.params[k] << '}';
+                }
+            }
+            if (da.num_params != db.num_params) {
+                sep(); o << "{\"field\":\"dsp[" << i << "].num_params\",\"a\":" << da.num_params
+                         << ",\"b\":" << db.num_params << '}';
+            }
+        }
+        o << "]}";
+        return o.str();
+    }
+
     void handle(SOCKET client) {
         DWORD timeout = 2000;
         setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
@@ -293,6 +398,16 @@ struct HttpServer::Impl {
         if (req.method == "GET" && req.path == "/") { respond(client, 200, kHtml, "text/html; charset=utf-8"); return; }
         if (req.method == "GET" && req.path == "/api/state") { respond(client, 200, state_json()); return; }
         if (req.method == "GET" && req.path == "/api/devices") { respond(client, 200, devices_json()); return; }
+        if (req.method == "GET" && req.path == "/api/probe/state") { respond(client, 200, probe_state_json()); return; }
+        if (req.method == "POST" && req.path == "/api/probe/snapshot") {
+            respond(client, 200, save_probe_snapshot(req.body)); return;
+        }
+        if (req.method == "POST" && req.path == "/api/probe/compare") {
+            const auto comma = req.body.find(',');
+            if (comma == std::string::npos) { respond(client, 400, "{\"error\":\"need a,b\"}"); return; }
+            respond(client, 200, compare_probe(req.body.substr(0, comma), req.body.substr(comma + 1)));
+            return;
+        }
         if (req.method == "POST" && req.path == "/api/capture/start") {
             if (!capture.start()) { respond(client,400,"{\"error\":\"capture start failed\"}"); return; }
             respond(client,200,"{}"); return;
@@ -356,8 +471,8 @@ struct HttpServer::Impl {
 };
 
 HttpServer::HttpServer(std::uint16_t p, ConfigStore& c, AudioRing& r, WasapiCapture& cap,
-                       fmod::DSPBridge& d, fmod::Controller& ctl) {
-    impl_ = new Impl{p,c,r,cap,d,ctl,&port_};
+                       fmod::DSPBridge& d, fmod::Controller& ctl, AudioStateProbe& pr) {
+    impl_ = new Impl{p,c,r,cap,d,ctl,pr,&port_};
 }
 HttpServer::~HttpServer() { delete impl_; impl_ = nullptr; }
 } // namespace fh6r::http

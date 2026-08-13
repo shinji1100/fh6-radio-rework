@@ -128,4 +128,13 @@ std::vector<std::byte*> scout_anchor(const PEImage& img, std::string_view anchor
     }
     return out;
 }
+
+std::byte* resolve_by_anchor_unique(const PEImage& img, std::string_view anchor) noexcept {
+    const auto cands = scout_anchor(img, anchor);
+    if (cands.size() != 1) {
+        log::warn("[sig] anchor '{}' candidates={} (need exactly 1)", anchor, cands.size());
+        return nullptr;
+    }
+    return cands.front();
+}
 } // namespace fh6r::fmod

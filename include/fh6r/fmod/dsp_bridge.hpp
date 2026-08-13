@@ -6,6 +6,10 @@
 #include <cstdint>
 
 namespace fh6r::fmod {
+// Minimal FMOD ABI structs needed by the audio-state probe. FMOD_VECTOR is
+// {float x,y,z}; FMOD uses a plain 3-float layout on x64.
+struct FMOD_VEC { float x = 0; float y = 0; float z = 0; };
+
 struct FMODFns {
     using SystemCreateDSP = std::uint32_t (*)(void*, const void*, void**);
     using DSPRelease = std::uint32_t (*)(void*);
@@ -13,14 +17,32 @@ struct FMODFns {
     using RemoveDSP = std::uint32_t (*)(std::uint64_t, void*);
     using HandleResolver = std::uint32_t (*)(std::uint32_t, void**, std::uint64_t*);
     using HandleUnlock = std::uint32_t (*)(std::uint64_t);
+    // Phase 1 audio-state probe surface (resolved by anchor+LEA, one candidate each).
+    using SysGet3DListenerAttrs = std::uint32_t (*)(void*, std::int32_t, FMOD_VEC*, FMOD_VEC*, FMOD_VEC*, FMOD_VEC*);
+    using CCGetNumDSPs = std::uint32_t (*)(std::uint64_t, std::int32_t*);
+    using CCGetDSP = std::uint32_t (*)(std::uint64_t, std::int32_t, void**);
+    using DSPGetType = std::uint32_t (*)(void*, std::int32_t*);
+    using DSPGetNumParameters = std::uint32_t (*)(void*, std::int32_t*);
+    using DSPGetParameterFloat = std::uint32_t (*)(void*, std::int32_t, float*, char*);
     SystemCreateDSP system_create_dsp = nullptr;
     DSPRelease dsp_release = nullptr;
     AddDSP add_dsp = nullptr;
     RemoveDSP remove_dsp = nullptr;
     HandleResolver resolver = nullptr;
     HandleUnlock unlock = nullptr;
+    SysGet3DListenerAttrs get3d_listener_attrs = nullptr;
+    CCGetNumDSPs get_num_dsps = nullptr;
+    CCGetDSP get_dsp = nullptr;
+    DSPGetType dsp_get_type = nullptr;
+    DSPGetNumParameters dsp_get_num_parameters = nullptr;
+    DSPGetParameterFloat dsp_get_parameter_float = nullptr;
     std::byte* host_base = nullptr;
     bool ready() const noexcept { return host_base && dsp_release && add_dsp && remove_dsp && resolver && unlock; }
+    // Probe APIs are optional to audio injection; present iff each anchor resolved uniquely.
+    bool probe_ready() const noexcept {
+        return get3d_listener_attrs && get_num_dsps && get_dsp && dsp_get_type &&
+               dsp_get_num_parameters && dsp_get_parameter_float;
+    }
 };
 bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept;
 
@@ -50,6 +72,12 @@ public:
     void set_gain(float gain) noexcept;
     void set_native_stereo(bool on) noexcept { native_stereo_.store(on, std::memory_order_release); }
     DSPStats stats() const noexcept;
+
+    // Probe access: the live channel handle, the FMOD System pointer and the
+    // resolved function table. Valid while a target is attached (handle != 0).
+    std::uint32_t channel_handle() const noexcept { return handle_.load(std::memory_order_acquire); }
+    void* system() const noexcept { return system_; }
+    const FMODFns& fns() const noexcept { return fns_; }
 
     static std::uint32_t __stdcall read_callback(void*, float*, float*, std::uint32_t,
                                                   std::int32_t, std::int32_t*);

@@ -1,4 +1,5 @@
 #include "fh6r/audio_ring.hpp"
+#include "fh6r/audio_state_probe.hpp"
 #include "fh6r/config.hpp"
 #include "fh6r/fmod/controller.hpp"
 #include "fh6r/fmod/dsp_bridge.hpp"
@@ -60,7 +61,8 @@ void run_bridge(HMODULE self) noexcept {
         dsp.set_gain(cfg.gain);
         dsp.set_native_stereo(cfg.native_stereo);
         fmod::Controller controller{dsp, image};
-        http::HttpServer http{cfg.dashboard_port, config, ring, capture, dsp, controller};
+        AudioStateProbe probe{dsp};
+        http::HttpServer http{cfg.dashboard_port, config, ring, capture, dsp, controller, probe};
 
         // version.dll stays resident for the lifetime of the game. Keep all
         // services owned by this bootstrap thread; process teardown will end it.

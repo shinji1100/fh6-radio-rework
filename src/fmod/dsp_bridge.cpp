@@ -49,6 +49,20 @@ bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
     out.remove_dsp = reinterpret_cast<FMODFns::RemoveDSP>(find_by_anchor(img, kSigs[3].anchor, kSigs[3].pattern));
     out.resolver = reinterpret_cast<FMODFns::HandleResolver>(find_by_pattern(img, kResolver));
     out.unlock = reinterpret_cast<FMODFns::HandleUnlock>(find_by_pattern(img, kUnlock));
+    // Phase 1 audio-state probe APIs: resolved by anchor+LEA (one candidate each,
+    // confirmed by the runtime scout). Optional to audio injection.
+    out.get3d_listener_attrs = reinterpret_cast<FMODFns::SysGet3DListenerAttrs>(
+        resolve_by_anchor_unique(img, "System::get3DListenerAttributes"));
+    out.get_num_dsps = reinterpret_cast<FMODFns::CCGetNumDSPs>(
+        resolve_by_anchor_unique(img, "ChannelControl::getNumDSPs"));
+    out.get_dsp = reinterpret_cast<FMODFns::CCGetDSP>(
+        resolve_by_anchor_unique(img, "ChannelControl::getDSP"));
+    out.dsp_get_type = reinterpret_cast<FMODFns::DSPGetType>(
+        resolve_by_anchor_unique(img, "DSP::getType"));
+    out.dsp_get_num_parameters = reinterpret_cast<FMODFns::DSPGetNumParameters>(
+        resolve_by_anchor_unique(img, "DSP::getNumParameters"));
+    out.dsp_get_parameter_float = reinterpret_cast<FMODFns::DSPGetParameterFloat>(
+        resolve_by_anchor_unique(img, "DSP::getParameterFloat"));
     log::info("[fmod] create=0x{:X} release=0x{:X} add=0x{:X} remove=0x{:X} resolver=0x{:X} unlock=0x{:X}",
               reinterpret_cast<std::uintptr_t>(out.system_create_dsp),
               reinterpret_cast<std::uintptr_t>(out.dsp_release),
@@ -56,6 +70,13 @@ bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
               reinterpret_cast<std::uintptr_t>(out.remove_dsp),
               reinterpret_cast<std::uintptr_t>(out.resolver),
               reinterpret_cast<std::uintptr_t>(out.unlock));
+    log::info("[fmod] probe listener=0x{:X} getNumDSPs=0x{:X} getDSP=0x{:X} getType=0x{:X} getNumParams=0x{:X} getParamFloat=0x{:X}",
+              reinterpret_cast<std::uintptr_t>(out.get3d_listener_attrs),
+              reinterpret_cast<std::uintptr_t>(out.get_num_dsps),
+              reinterpret_cast<std::uintptr_t>(out.get_dsp),
+              reinterpret_cast<std::uintptr_t>(out.dsp_get_type),
+              reinterpret_cast<std::uintptr_t>(out.dsp_get_num_parameters),
+              reinterpret_cast<std::uintptr_t>(out.dsp_get_parameter_float));
     return out.ready();
 }
 
