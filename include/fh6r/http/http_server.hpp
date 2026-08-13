@@ -8,6 +8,7 @@ class AudioRing;
 class ConfigStore;
 class WasapiCapture;
 class AudioStateProbe;
+class MemoryDiff;
 namespace fmod { class DSPBridge; class Controller; }
 
 namespace http {
@@ -15,7 +16,7 @@ class HttpServer {
 public:
     HttpServer(std::uint16_t port, ConfigStore& config, AudioRing& ring,
                WasapiCapture& capture, fmod::DSPBridge& dsp, fmod::Controller& controller,
-               AudioStateProbe& probe);
+               AudioStateProbe& probe, MemoryDiff& memdiff);
     ~HttpServer();
     HttpServer(const HttpServer&) = delete;
     HttpServer& operator=(const HttpServer&) = delete;

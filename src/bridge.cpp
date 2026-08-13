@@ -9,6 +9,7 @@
 #include "fh6r/fmod/studio_probe.hpp"
 #include "fh6r/http/http_server.hpp"
 #include "fh6r/log.hpp"
+#include "fh6r/memory_diff.hpp"
 #include "fh6r/wasapi_capture.hpp"
 
 #include <windows.h>
@@ -74,7 +75,8 @@ void run_bridge(HMODULE self) noexcept {
         dsp.set_native_stereo(cfg.native_stereo);
         fmod::Controller controller{dsp, image};
         AudioStateProbe probe{dsp};
-        http::HttpServer http{cfg.dashboard_port, config, ring, capture, dsp, controller, probe};
+        MemoryDiff memdiff{image};
+        http::HttpServer http{cfg.dashboard_port, config, ring, capture, dsp, controller, probe, memdiff};
 
         // version.dll stays resident for the lifetime of the game. Keep all
         // services owned by this bootstrap thread; process teardown will end it.

@@ -1,6 +1,7 @@
 #include "fh6r/http/http_server.hpp"
 #include "fh6r/audio_ring.hpp"
 #include "fh6r/audio_state_probe.hpp"
+#include "fh6r/memory_diff.hpp"
 #include "fh6r/config.hpp"
 #include "fh6r/fmod/controller.hpp"
 #include "fh6r/fmod/dsp_bridge.hpp"
@@ -199,6 +200,10 @@ label{display:block;margin:12px 0 6px;color:#abb5bf}select,input[type=range]{wid
 <section class="card"><h2>音频状态探测</h2>
 <div class="row"><button id="saveCockpit">存为 cockpit</button><button id="saveChase">存为 chase</button><button id="compare">对比 cockpit/chase</button></div>
 <div id="probe" class="muted">—</div><div id="cmp" class="muted"></div></section>
+<section class="card"><h2>相机状态差分（只读）</h2>
+<div class="row"><button id="mdCapture">capture</button><button id="mdReset">reset</button></div>
+<p class="muted">停车、不换车：驾驶舱点 capture → 切到追尾点 capture → 切回驾驶舱点 capture（第 3 次自动分析，列出随视角翻转的内存位）。</p>
+<div id="md" class="muted">—</div></section>
 </main><script>
 const $=id=>document.getElementById(id);let state=null;
 async function api(path,opt){const r=await fetch(path,opt);if(!r.ok)throw new Error(await r.text());const t=await r.text();return t?JSON.parse(t):{};}
@@ -220,6 +225,8 @@ async function refreshProbe(){try{const p=await api('/api/probe/state');let t=p.
 $('saveCockpit').onclick=async()=>{await api('/api/probe/snapshot',{method:'POST',headers:{'Content-Type':'text/plain'},body:'cockpit'});await refreshProbe()};
 $('saveChase').onclick=async()=>{await api('/api/probe/snapshot',{method:'POST',headers:{'Content-Type':'text/plain'},body:'chase'});await refreshProbe()};
 $('compare').onclick=async()=>{try{const c=await api('/api/probe/compare',{method:'POST',headers:{'Content-Type':'text/plain'},body:'cockpit,chase'});$('cmp').textContent=c.changes&&c.changes.length?('变化: '+JSON.stringify(c.changes)):(c.error||'无变化');}catch(e){$('cmp').textContent=String(e)}};
+$('mdCapture').onclick=async()=>{try{const r=await api('/api/memdiff/capture',{method:'POST'});$('md').textContent='已捕获 '+r.captures+'/3'+(r.candidates&&r.candidates.length?(' · 候选 '+r.candidates.length+' 个：'+r.candidates.slice(0,20).map(c=>c.offset+'['+c.s1+'→'+c.s2+'→'+c.s3+']').join(' ')):'');}catch(e){$('md').textContent=String(e)}};
+$('mdReset').onclick=async()=>{try{await api('/api/memdiff/reset',{method:'POST'});$('md').textContent='已重置';}catch(e){$('md').textContent=String(e)}};
 (async()=>{await refresh();await devices();refreshProbe();setInterval(refresh,1000);setInterval(refreshProbe,1000)})();
 </script></body></html>)HTML";
 }
@@ -231,6 +238,7 @@ struct HttpServer::Impl {
     fmod::DSPBridge& dsp;
     fmod::Controller& controller;
     AudioStateProbe& probe;
+    MemoryDiff& memdiff;
     std::uint16_t requested_port;
     std::atomic<std::uint16_t>* published_port;
     std::atomic<bool> stopping{false};
@@ -239,8 +247,10 @@ struct HttpServer::Impl {
     std::map<std::string, AudioStateSnapshot> saved;
 
     Impl(std::uint16_t p, ConfigStore& c, AudioRing& r, WasapiCapture& cap,
-         fmod::DSPBridge& d, fmod::Controller& ctl, AudioStateProbe& pr, std::atomic<std::uint16_t>* pub)
-        : config{c}, ring{r}, capture{cap}, dsp{d}, controller{ctl}, probe{pr}, requested_port{p}, published_port{pub},
+         fmod::DSPBridge& d, fmod::Controller& ctl, AudioStateProbe& pr, MemoryDiff& md,
+         std::atomic<std::uint16_t>* pub)
+        : config{c}, ring{r}, capture{cap}, dsp{d}, controller{ctl}, probe{pr}, memdiff{md},
+          requested_port{p}, published_port{pub},
           thread{[this] { run(); }} {}
     ~Impl() {
         stopping.store(true, std::memory_order_release);
@@ -408,6 +418,15 @@ struct HttpServer::Impl {
             respond(client, 200, compare_probe(req.body.substr(0, comma), req.body.substr(comma + 1)));
             return;
         }
+        if (req.method == "POST" && req.path == "/api/memdiff/capture") {
+            memdiff.capture(); respond(client, 200, memdiff.result_json()); return;
+        }
+        if (req.method == "POST" && req.path == "/api/memdiff/reset") {
+            memdiff.reset(); respond(client, 200, memdiff.result_json()); return;
+        }
+        if (req.method == "GET" && req.path == "/api/memdiff/result") {
+            respond(client, 200, memdiff.result_json()); return;
+        }
         if (req.method == "POST" && req.path == "/api/capture/start") {
             if (!capture.start()) { respond(client,400,"{\"error\":\"capture start failed\"}"); return; }
             respond(client,200,"{}"); return;
@@ -471,8 +490,9 @@ struct HttpServer::Impl {
 };
 
 HttpServer::HttpServer(std::uint16_t p, ConfigStore& c, AudioRing& r, WasapiCapture& cap,
-                       fmod::DSPBridge& d, fmod::Controller& ctl, AudioStateProbe& pr) {
-    impl_ = new Impl{p,c,r,cap,d,ctl,pr,&port_};
+                       fmod::DSPBridge& d, fmod::Controller& ctl, AudioStateProbe& pr,
+                       MemoryDiff& md) {
+    impl_ = new Impl{p,c,r,cap,d,ctl,pr,md,&port_};
 }
 HttpServer::~HttpServer() { delete impl_; impl_ = nullptr; }
 } // namespace fh6r::http
