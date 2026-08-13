@@ -35,10 +35,24 @@ ConfigSnapshot ConfigStore::load() {
         if (key.empty() || key.starts_with('#') || key.starts_with(';')) continue;
         if (key == "endpoint_id") loaded.endpoint_id = value;
         else if (key == "native_stereo") loaded.native_stereo = parse_bool(value, loaded.native_stereo);
+        else if (key == "spatial_audio") loaded.spatial_audio = parse_bool(value, loaded.spatial_audio);
+        else if (key == "binaural") loaded.binaural = parse_bool(value, loaded.binaural);
+        else if (key == "cabin_profile") loaded.cabin_profile = value;
+        else if (key == "speaker_layout") loaded.speaker_layout = value;
         else if (key == "gain") {
             try {
                 const float g = std::stof(value);
                 if (std::isfinite(g)) loaded.gain = std::clamp(g, 0.0f, 2.0f);
+            } catch (...) {}
+        } else if (key == "cabin_wet" || key == "driver_offset" ||
+                   key == "head_width_m" || key == "cabin_openness") {
+            try {
+                const float v = std::stof(value);
+                if (!std::isfinite(v)) continue;
+                if (key == "cabin_wet") loaded.cabin_wet = std::clamp(v, 0.0f, 1.0f);
+                else if (key == "driver_offset") loaded.driver_offset = std::clamp(v, 0.0f, 1.0f);
+                else if (key == "head_width_m") loaded.head_width_m = std::clamp(v, 0.12f, 0.24f);
+                else loaded.cabin_openness = std::clamp(v, 0.0f, 1.0f);
             } catch (...) {}
         } else if (key == "dashboard_port") {
             try {
@@ -74,6 +88,14 @@ bool ConfigStore::save() const {
         << "endpoint_id=" << s.endpoint_id << "\n"
         << "gain=" << s.gain << "\n"
         << "native_stereo=" << (s.native_stereo ? "true" : "false") << "\n"
+        << "spatial_audio=" << (s.spatial_audio ? "true" : "false") << "\n"
+        << "binaural=" << (s.binaural ? "true" : "false") << "\n"
+        << "cabin_profile=" << s.cabin_profile << "\n"
+        << "speaker_layout=" << s.speaker_layout << "\n"
+        << "cabin_wet=" << s.cabin_wet << "\n"
+        << "driver_offset=" << s.driver_offset << "\n"
+        << "head_width_m=" << s.head_width_m << "\n"
+        << "cabin_openness=" << s.cabin_openness << "\n"
         << "dashboard_port=" << s.dashboard_port << "\n";
     out.flush();
     if (!out) return false;

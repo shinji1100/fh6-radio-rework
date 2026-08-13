@@ -85,6 +85,23 @@ void run_bridge(HMODULE self) noexcept {
         fmod::DSPBridge dsp{ring, fns};
         dsp.set_gain(cfg.gain);
         dsp.set_native_stereo(cfg.native_stereo);
+        dsp.set_spatial_audio(cfg.spatial_audio);
+        dsp.set_binaural(cfg.binaural);
+        if (!dsp.set_cabin_profile(cfg.cabin_profile)) {
+            log::warn("[cabin] unknown profile '{}', using sportscar", cfg.cabin_profile);
+            dsp.set_cabin_profile("sportscar");
+        }
+        if (!dsp.set_speaker_layout(cfg.speaker_layout)) {
+            log::warn("[cabin] unknown speaker layout '{}', using premium6", cfg.speaker_layout);
+            dsp.set_speaker_layout("premium6");
+        }
+        dsp.set_cabin_wet(cfg.cabin_wet);
+        dsp.set_driver_offset(cfg.driver_offset);
+        dsp.set_head_width_m(cfg.head_width_m);
+        dsp.set_cabin_openness(cfg.cabin_openness);
+        log::info("[cabin] spatial={} binaural={} profile='{}' layout='{}' wet={:.3f} openness={:.3f}",
+                  cfg.spatial_audio, cfg.binaural, cfg.cabin_profile, cfg.speaker_layout,
+                  cfg.cabin_wet, cfg.cabin_openness);
         fmod::Controller controller{dsp, image};
         AudioStateProbe probe{dsp, data_dir.string()};
         MemoryDiff memdiff{image};

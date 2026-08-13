@@ -1,10 +1,12 @@
 #pragma once
 #include "fh6r/audio_ring.hpp"
+#include "fh6r/cabin_dsp.hpp"
 #include "fh6r/fmod/fmod_dsp_type.hpp"
 #include "fh6r/fmod/pe_image.hpp"
 #include "fh6r/fmod/radio_discovery.hpp"
 #include <atomic>
 #include <cstdint>
+#include <string_view>
 
 namespace fh6r::fmod {
 // Minimal FMOD ABI structs needed by the audio-state probe. FMOD_VECTOR is
@@ -107,6 +109,14 @@ public:
     void detach() noexcept;
     void set_gain(float gain) noexcept;
     void set_native_stereo(bool on) noexcept { native_stereo_.store(on, std::memory_order_release); }
+    void set_spatial_audio(bool on) noexcept { spatial_audio_.store(on, std::memory_order_release); }
+    void set_binaural(bool on) noexcept { cabin_.set_binaural(on); }
+    bool set_cabin_profile(std::string_view name) noexcept;
+    bool set_speaker_layout(std::string_view name) noexcept;
+    void set_cabin_wet(float v) noexcept { cabin_.set_cabin_wet(v); }
+    void set_driver_offset(float v) noexcept { cabin_.set_driver_offset(v); }
+    void set_head_width_m(float v) noexcept { cabin_.set_head_width_m(v); }
+    void set_cabin_openness(float v) noexcept { cabin_.set_openness(v); }
     DSPStats stats() const noexcept;
 
     // Probe access: the live channel handle, the FMOD System pointer and the
@@ -130,6 +140,9 @@ private:
     std::atomic<std::uint32_t> handle_{0};
     std::atomic<float> gain_{1.0f};
     std::atomic<bool> native_stereo_{false};
+    std::atomic<bool> spatial_audio_{true};
+    std::atomic<bool> cabin_reset_requested_{false};
+    CabinDSP cabin_;
     std::atomic<std::uint64_t> callbacks_{0};
     std::atomic<std::uint64_t> underrun_frames_{0};
     std::atomic<std::uint64_t> rebuffer_events_{0};

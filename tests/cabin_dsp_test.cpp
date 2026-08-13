@@ -88,6 +88,68 @@ int main() {
         }
     }
 
+    // 8. Every supported vehicle profile and speaker layout is stable.
+    {
+        constexpr fh6r::CabinProfile profiles[] = {
+            fh6r::CabinProfile::Generic, fh6r::CabinProfile::Luxury,
+            fh6r::CabinProfile::Race, fh6r::CabinProfile::Saloon,
+            fh6r::CabinProfile::SportsCar, fh6r::CabinProfile::Van,
+        };
+        constexpr fh6r::SpeakerLayout layouts[] = {
+            fh6r::SpeakerLayout::Front2, fh6r::SpeakerLayout::Cabin4,
+            fh6r::SpeakerLayout::Premium6, fh6r::SpeakerLayout::Surround8,
+        };
+        for (auto profile : profiles) for (auto layout : layouts) {
+            dsp.set_profile(profile);
+            dsp.set_speaker_layout(layout);
+            const float p = run_tone(dsp, fh6r::CabinMode::Cockpit, 12000);
+            assert(p > 0.0f && p <= 1.001f);
+        }
+    }
+
+    // 9. The binaural renderer creates a cross-ear image from a hard-left
+    //    impulse while preserving a left/right level difference.
+    {
+        dsp.set_speaker_layout(fh6r::SpeakerLayout::Premium6);
+        dsp.set_binaural(true);
+        dsp.reset();
+        double energy_l = 0.0, energy_r = 0.0;
+        for (int i = 0; i < 4096; ++i) {
+            float l = i == 0 ? 0.8f : 0.0f;
+            float r = 0.0f;
+            dsp.process(l, r);
+            assert(finite(l) && finite(r));
+            energy_l += static_cast<double>(l) * l;
+            energy_r += static_cast<double>(r) * r;
+        }
+        assert(energy_l > 0.0 && energy_r > 0.0);
+        assert(std::fabs(energy_l - energy_r) > 1e-8);
+        dsp.set_binaural(false);
+    }
+
+    // 10. A closed-to-open convertible transition is smoothed and remains
+    //     bounded without resetting the delay network.
+    {
+        dsp.set_openness(0.0f);
+        dsp.reset();
+        for (int i = 0; i < 4096; ++i) {
+            float l = 0.2f, r = -0.1f;
+            if (i == 512) dsp.set_openness(1.0f);
+            dsp.process(l, r);
+            assert(finite(l) && finite(r));
+            assert(std::fabs(l) <= 1.001f && std::fabs(r) <= 1.001f);
+        }
+        dsp.set_openness(0.0f);
+    }
+
+    // 11. String controls reject unknown values and accept documented names.
+    assert(dsp.set_profile_name("luxury"));
+    assert(dsp.profile() == fh6r::CabinProfile::Luxury);
+    assert(!dsp.set_profile_name("not-a-profile"));
+    assert(dsp.set_speaker_layout_name("surround8"));
+    assert(dsp.speaker_layout() == fh6r::SpeakerLayout::Surround8);
+    assert(!dsp.set_speaker_layout_name("not-a-layout"));
+
     std::puts("cabin_dsp_test: all checks passed");
     return 0;
 }

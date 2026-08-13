@@ -115,6 +115,22 @@ void DSPBridge::set_gain(float g) noexcept {
     gain_.store(std::clamp(g, 0.0f, 2.0f), std::memory_order_release);
 }
 
+bool DSPBridge::set_cabin_profile(std::string_view name) noexcept {
+    if (!cabin_.set_profile_name(name)) return false;
+    // Vehicle changes occur behind a loading blackout. Drop the previous
+    // vehicle's reverb state instead of crossfading two cabin models. The
+    // mixer callback owns the actual reset so control and audio threads never
+    // write the delay network concurrently.
+    cabin_reset_requested_.store(true, std::memory_order_release);
+    return true;
+}
+
+bool DSPBridge::set_speaker_layout(std::string_view name) noexcept {
+    if (!cabin_.set_speaker_layout_name(name)) return false;
+    cabin_reset_requested_.store(true, std::memory_order_release);
+    return true;
+}
+
 bool DSPBridge::validate(std::uint32_t h) const noexcept {
     if (!h || !fns_.resolver) return false;
     void* inst = nullptr;
@@ -223,7 +239,11 @@ std::uint32_t __stdcall DSPBridge::read_callback(void*, float* /*in*/, float* ou
 
     if (b->ring_.consumer_apply_reset()) {
         b->primed_.store(false, std::memory_order_release);
+        b->cabin_.reset();
+        b->cabin_reset_requested_.store(false, std::memory_order_release);
     }
+    if (b->cabin_reset_requested_.exchange(false, std::memory_order_acq_rel))
+        b->cabin_.reset();
 
     // Do not start draining from an empty producer/consumer boundary. A short
     // prebuffer absorbs scheduler jitter; after a real underrun we re-arm it
@@ -244,17 +264,19 @@ std::uint32_t __stdcall DSPBridge::read_callback(void*, float* /*in*/, float* ou
     std::uint32_t produced = 0;
     const float gain = b->gain_.load(std::memory_order_relaxed);
     const bool native_stereo = b->native_stereo_.load(std::memory_order_relaxed);
+    const bool spatial_audio = b->spatial_audio_.load(std::memory_order_relaxed);
 
     while (produced < length) {
         const auto want = std::min<std::uint32_t>(kChunk, length - produced);
         const auto got = static_cast<std::uint32_t>(b->ring_.pop(frames, want));
         for (std::uint32_t i = 0; i < got; ++i) {
-            const float l = (frames[i].l / 32768.0f) * gain;
-            const float r = (frames[i].r / 32768.0f) * gain;
+            float l = (frames[i].l / 32768.0f) * gain;
+            float r = (frames[i].r / 32768.0f) * gain;
+            if (spatial_audio) b->cabin_.process(l, r);
             float* dst = out + (static_cast<std::size_t>(produced + i) * static_cast<std::size_t>(channels));
             // Preserve FMOD's allocated buffer shape. Default mode writes the
             // same mono sample to every channel; native stereo is opt-in only.
-            dsp_contract::write_frame(dst, channels, l, r, native_stereo);
+            dsp_contract::write_frame(dst, channels, l, r, spatial_audio || native_stereo);
         }
         produced += got;
         if (got < want) {
