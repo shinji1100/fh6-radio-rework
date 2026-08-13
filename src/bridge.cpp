@@ -8,6 +8,7 @@
 #include "fh6r/fmod/studio_api_scout.hpp"
 #include "fh6r/fmod/studio_param_hook.hpp"
 #include "fh6r/fmod/studio_probe.hpp"
+#include "fh6r/fmod/studio_system_scout.hpp"
 #include "fh6r/http/http_server.hpp"
 #include "fh6r/log.hpp"
 #include "fh6r/memory_diff.hpp"
@@ -70,6 +71,11 @@ void run_bridge(HMODULE self) noexcept {
         // MISSING / RESOLVED / AMBIGUOUS per anchor. Read-only; no API is called
         // and no object memory is inspected (only address reliability).
         if (image.valid()) fmod::scout_studio_api(image);
+
+        // Studio enumeration route, Step 2: resolve the Studio factory/lifecycle
+        // methods and scan .text for FH6 call xrefs, dumping the RCX source (the
+        // Studio System out-param / handle storage). Read-only.
+        if (image.valid()) fmod::scout_studio_system(image);
 
         // Phase 1 (interior/exterior state): observe the FMOD Studio parameter
         // setters (read-only detour) to confirm the "Cockpit" global parameter
