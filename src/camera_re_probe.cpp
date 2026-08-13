@@ -11,15 +11,20 @@
 #include <iterator>
 #include <string>
 #include <thread>
-#include <utility>
 
 namespace fh6r {
 namespace {
 
+using namespace std::chrono_literals;
+
 constexpr std::uint32_t kExpectedTimestamp = 0x6A58A086u;
 constexpr std::uint32_t kExpectedChecksum = 0x0AF21AAAu;
 constexpr std::uintptr_t kCabinViewFlagRva = 0x08EF67C0u;
-constexpr std::uint64_t kWrite4ControlNibble = 0xDu; // RW=01 (write), LEN=11 (4 bytes)
+
+// DR7 R/W0 = 01b (write), LEN0 = 11b (4 bytes).
+// In the four-bit R/W+LEN field at bits 16..19 this is 1101b = 0xD.
+constexpr std::uint64_t kWrite4ControlNibble = 0xDu;
+constexpr auto kSessionTimeout = 20s;
 
 CameraReProbe* volatile g_active_probe = nullptr;
 
@@ -30,6 +35,19 @@ bool target_is_in_data(const fmod::PEImage& image, std::uintptr_t target) noexce
         return ptr >= section.start && ptr + sizeof(std::uint32_t) <= section.end;
     }
     return false;
+}
+
+std::wstring make_trigger_path() {
+    std::wstring path(32768, L'\0');
+    const DWORD n = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (!n || n >= path.size()) return {};
+    path.resize(n);
+
+    const auto slash = path.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return {};
+    path.resize(slash + 1);
+    path += L"fh6-radio-rework\\camera_re_arm.txt";
+    return path;
 }
 
 std::string hex_bytes(const fmod::PEImage& image, std::uintptr_t center,
@@ -47,9 +65,12 @@ std::string hex_bytes(const fmod::PEImage& image, std::uintptr_t center,
 
     std::array<std::uint8_t, kBefore + kAfter> bytes{};
     SIZE_T read = 0;
-    const SIZE_T wanted = static_cast<SIZE_T>(std::min<std::uintptr_t>(bytes.size(), end - start));
+    const SIZE_T wanted =
+        static_cast<SIZE_T>(std::min<std::uintptr_t>(bytes.size(), end - start));
+
     if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(start),
-                           bytes.data(), wanted, &read) || read == 0) {
+                           bytes.data(), wanted, &read) ||
+        read == 0) {
         return {};
     }
 
@@ -62,6 +83,7 @@ std::string hex_bytes(const fmod::PEImage& image, std::uintptr_t center,
         out.push_back(kHex[b >> 4]);
         out.push_back(kHex[b & 0x0F]);
     }
+
     start_rva = start - reinterpret_cast<std::uintptr_t>(image.base);
     return out;
 }
@@ -70,10 +92,13 @@ std::uint32_t containing_function_rva(const fmod::PEImage& image,
                                       std::uintptr_t absolute_address) noexcept {
     const auto base = reinterpret_cast<std::uintptr_t>(image.base);
     if (absolute_address < base || absolute_address >= base + image.size) return 0;
+
     const auto rva64 = absolute_address - base;
     if (rva64 > UINT32_MAX) return 0;
+
     const auto rva = static_cast<std::uint32_t>(rva64);
-    const auto it = std::upper_bound(image.function_rvas.begin(), image.function_rvas.end(), rva);
+    const auto it =
+        std::upper_bound(image.function_rvas.begin(), image.function_rvas.end(), rva);
     if (it == image.function_rvas.begin()) return 0;
     return *std::prev(it);
 }
@@ -83,10 +108,13 @@ public:
     explicit ScopedSuspend(HANDLE thread) noexcept : thread_(thread) {
         suspended_ = SuspendThread(thread_) != static_cast<DWORD>(-1);
     }
+
     ~ScopedSuspend() {
         if (suspended_) ResumeThread(thread_);
     }
+
     bool ok() const noexcept { return suspended_; }
+
 private:
     HANDLE thread_ = nullptr;
     bool suspended_ = false;
@@ -96,79 +124,143 @@ private:
 
 CameraReProbe::CameraReProbe(const fmod::PEImage& image) noexcept : image_(&image) {
     if (!image.valid()) {
-        log::warn("[camera-re] disabled: invalid PE image");
+        log::warn("[camera-re] dormant probe disabled: invalid PE image");
         return;
     }
+
     if (image.time_date_stamp != kExpectedTimestamp || image.checksum != kExpectedChecksum) {
-        log::warn("[camera-re] disabled: build mismatch timestamp=0x{:08X} checksum=0x{:08X}",
-                  image.time_date_stamp, image.checksum);
+        log::warn(
+            "[camera-re] dormant probe disabled: build mismatch timestamp=0x{:08X} checksum=0x{:08X}",
+            image.time_date_stamp, image.checksum);
         return;
     }
+
     if (kCabinViewFlagRva + sizeof(std::uint32_t) > image.size) {
-        log::warn("[camera-re] disabled: target RVA outside image");
+        log::warn("[camera-re] dormant probe disabled: target RVA outside image");
         return;
     }
 
     target_ = reinterpret_cast<std::uintptr_t>(image.base) + kCabinViewFlagRva;
     if (!target_is_in_data(image, target_)) {
-        log::warn("[camera-re] disabled: +0x{:X} is not inside .data", kCabinViewFlagRva);
+        log::warn("[camera-re] dormant probe disabled: +0x{:X} is not inside .data",
+                  kCabinViewFlagRva);
         target_ = 0;
         return;
     }
-    if (IsDebuggerPresent()) {
-        log::warn("[camera-re] disabled: debugger already attached; refusing to alter DR0-DR3");
+
+    trigger_path_ = make_trigger_path();
+    if (trigger_path_.empty()) {
+        log::warn("[camera-re] dormant probe disabled: could not derive trigger path");
         target_ = 0;
         return;
+    }
+
+    try {
+        worker_ = std::jthread([this](std::stop_token stop) { worker(stop); });
+    } catch (...) {
+        target_ = 0;
+        log::warn("[camera-re] dormant probe disabled: worker creation failed");
+        return;
+    }
+
+    log::info(
+        "[camera-re] dormant; no VEH/DR/thread suspension until fh6-radio-rework\\camera_re_arm.txt exists");
+}
+
+CameraReProbe::~CameraReProbe() {
+    if (worker_.joinable()) {
+        worker_.request_stop();
+        try {
+            worker_.join();
+        } catch (...) {
+        }
+    }
+}
+
+bool CameraReProbe::consume_trigger() noexcept {
+    if (trigger_path_.empty()) return false;
+
+    const DWORD attrs = GetFileAttributesW(trigger_path_.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        return false;
+    }
+
+    // Consume first. If the later arm attempt fails, creating the marker again
+    // explicitly starts another experiment instead of silently retrying.
+    DeleteFileW(trigger_path_.c_str());
+    return true;
+}
+
+bool CameraReProbe::begin_session() noexcept {
+    if (!target_ || InterlockedCompareExchange(&enabled_, 0, 0) != 0) return false;
+
+    if (IsDebuggerPresent()) {
+        log::warn("[camera-re] trigger ignored: debugger attached");
+        return false;
     }
 
     const auto initial = *reinterpret_cast<volatile const std::uint32_t*>(target_);
+    if (initial > 1) {
+        log::warn("[camera-re] trigger ignored: cabin flag is {}, expected 0/1", initial);
+        return false;
+    }
+
+    for (auto& slot : events_) {
+        InterlockedExchange(&slot.ready, 0);
+    }
+    InterlockedExchange(&next_event_, 0);
     InterlockedExchange(&last_value_, static_cast<LONG>(initial));
+    next_flush_ = 0;
+    armed_threads_.clear();
 
     if (InterlockedCompareExchangePointer(
             reinterpret_cast<PVOID volatile*>(&g_active_probe), this, nullptr) != nullptr) {
-        log::warn("[camera-re] disabled: another probe instance is already active");
-        target_ = 0;
-        return;
+        log::warn("[camera-re] trigger ignored: another probe session is active");
+        return false;
     }
 
     veh_handle_ = AddVectoredExceptionHandler(1, &CameraReProbe::vectored_handler);
     if (!veh_handle_) {
         InterlockedCompareExchangePointer(
             reinterpret_cast<PVOID volatile*>(&g_active_probe), nullptr, this);
-        log::warn("[camera-re] disabled: AddVectoredExceptionHandler failed error={}", GetLastError());
-        target_ = 0;
-        return;
+        log::warn("[camera-re] AddVectoredExceptionHandler failed error={}", GetLastError());
+        return false;
     }
 
+    // Keep the handler live before the first thread receives DR0.
     InterlockedExchange(&enabled_, 1);
-    try {
-        worker_ = std::jthread([this](std::stop_token stop) { worker(stop); });
-    } catch (...) {
-        InterlockedExchange(&enabled_, 0);
-        RemoveVectoredExceptionHandler(veh_handle_);
-        veh_handle_ = nullptr;
-        InterlockedCompareExchangePointer(
-            reinterpret_cast<PVOID volatile*>(&g_active_probe), nullptr, this);
-        target_ = 0;
-        log::warn("[camera-re] disabled: worker thread creation failed");
-        return;
+
+    const auto armed = arm_existing_threads_once();
+    if (armed == 0) {
+        end_session("no eligible thread could be armed");
+        return false;
     }
-    log::info("[camera-re] active target=+0x{:X} absolute=0x{:X} initial={} build={:08X}/{:08X}",
-              kCabinViewFlagRva, target_, initial, image.time_date_stamp, image.checksum);
+
+    log::info(
+        "[camera-re] ARMED ONCE target=+0x{:X} absolute=0x{:X} initial={} threads={} timeout=20s",
+        kCabinViewFlagRva, target_, initial, armed);
+    return true;
 }
 
-CameraReProbe::~CameraReProbe() {
-    if (worker_.joinable()) {
-        worker_.request_stop();
-        try { worker_.join(); } catch (...) {}
-    }
+void CameraReProbe::end_session(const char* reason) noexcept {
+    if (InterlockedCompareExchange(&enabled_, 0, 0) == 0 && !veh_handle_) return;
+
+    // Keep enabled_ and VEH live while removing DR0 from every thread we changed.
+    disarm_armed_threads();
+
     InterlockedExchange(&enabled_, 0);
+
     if (veh_handle_) {
         RemoveVectoredExceptionHandler(veh_handle_);
         veh_handle_ = nullptr;
     }
+
     InterlockedCompareExchangePointer(
         reinterpret_cast<PVOID volatile*>(&g_active_probe), nullptr, this);
+
+    log::info("[camera-re] DISARMED: {} captured_transitions={}",
+              reason ? reason : "session ended",
+              InterlockedCompareExchange(&next_event_, 0, 0));
 }
 
 LONG CALLBACK CameraReProbe::vectored_handler(EXCEPTION_POINTERS* pointers) noexcept {
@@ -176,27 +268,6 @@ LONG CALLBACK CameraReProbe::vectored_handler(EXCEPTION_POINTERS* pointers) noex
         reinterpret_cast<PVOID volatile*>(&g_active_probe), nullptr, nullptr));
     if (!probe) return EXCEPTION_CONTINUE_SEARCH;
     return probe->handle_exception(pointers);
-}
-
-std::uintptr_t CameraReProbe::debug_register_value(const CONTEXT& ctx, unsigned slot) const noexcept {
-    switch (slot) {
-        case 0: return static_cast<std::uintptr_t>(ctx.Dr0);
-        case 1: return static_cast<std::uintptr_t>(ctx.Dr1);
-        case 2: return static_cast<std::uintptr_t>(ctx.Dr2);
-        case 3: return static_cast<std::uintptr_t>(ctx.Dr3);
-        default: return 0;
-    }
-}
-
-void CameraReProbe::set_debug_register_value(CONTEXT& ctx, unsigned slot,
-                                              std::uintptr_t value) noexcept {
-    switch (slot) {
-        case 0: ctx.Dr0 = value; break;
-        case 1: ctx.Dr1 = value; break;
-        case 2: ctx.Dr2 = value; break;
-        case 3: ctx.Dr3 = value; break;
-        default: break;
-    }
 }
 
 LONG CameraReProbe::handle_exception(EXCEPTION_POINTERS* pointers) noexcept {
@@ -207,37 +278,33 @@ LONG CameraReProbe::handle_exception(EXCEPTION_POINTERS* pointers) noexcept {
     }
 
     CONTEXT& ctx = *pointers->ContextRecord;
-    unsigned hit_slot = 4;
-    for (unsigned slot = 0; slot < 4; ++slot) {
-        const auto status_bit = std::uint64_t{1} << slot;
-        const auto local_enable = std::uint64_t{1} << (slot * 2);
-        const auto control_shift = 16u + slot * 4u;
-        const auto control = (static_cast<std::uint64_t>(ctx.Dr7) >> control_shift) & 0xFu;
-        if ((static_cast<std::uint64_t>(ctx.Dr6) & status_bit) != 0 &&
-            (static_cast<std::uint64_t>(ctx.Dr7) & local_enable) != 0 &&
-            control == kWrite4ControlNibble && debug_register_value(ctx, slot) == target_) {
-            hit_slot = slot;
-            break;
-        }
+
+    constexpr std::uint64_t kB0 = 1ull << 0;
+    constexpr std::uint64_t kL0 = 1ull << 0;
+    constexpr unsigned kControlShift = 16;
+    const auto control =
+        (static_cast<std::uint64_t>(ctx.Dr7) >> kControlShift) & 0xFu;
+
+    if ((static_cast<std::uint64_t>(ctx.Dr6) & kB0) == 0 ||
+        (static_cast<std::uint64_t>(ctx.Dr7) & kL0) == 0 ||
+        control != kWrite4ControlNibble ||
+        static_cast<std::uintptr_t>(ctx.Dr0) != target_) {
+        return EXCEPTION_CONTINUE_SEARCH;
     }
-    if (hit_slot >= 4) return EXCEPTION_CONTINUE_SEARCH;
 
     const auto current = *reinterpret_cast<volatile const std::uint32_t*>(target_);
     const auto previous = static_cast<std::uint32_t>(
         InterlockedExchange(&last_value_, static_cast<LONG>(current)));
 
-    // The data breakpoint traps after the writing instruction. Preserve the trap
-    // RIP and full integer register state; offline analysis will decode backward
-    // from trap_rip to identify the exact writer instruction.
-    if (current != previous) {
+    if (current <= 1 && previous <= 1 && current != previous) {
         const LONG index = InterlockedIncrement(&next_event_) - 1;
         if (index >= 0 && static_cast<std::size_t>(index) < events_.size()) {
             auto& slot = events_[static_cast<std::size_t>(index)];
             auto& event = slot.event;
+
             event.thread_id = GetCurrentThreadId();
             event.previous_value = previous;
             event.current_value = current;
-            event.slot = static_cast<std::uint8_t>(hit_slot);
             event.trap_rip = static_cast<std::uintptr_t>(ctx.Rip);
             event.rflags = ctx.EFlags;
             event.dr6 = ctx.Dr6;
@@ -246,21 +313,26 @@ LONG CameraReProbe::handle_exception(EXCEPTION_POINTERS* pointers) noexcept {
                            ctx.Rsi, ctx.Rdi, ctx.Rbp, ctx.Rsp,
                            ctx.R8, ctx.R9, ctx.R10, ctx.R11,
                            ctx.R12, ctx.R13, ctx.R14, ctx.R15}};
+
             MemoryBarrier();
             InterlockedExchange(&slot.ready, 1);
         }
     }
 
-    ctx.Dr6 &= ~(std::uint64_t{1} << hit_slot);
+    // Consume only our DR0 single-step condition. We arm a thread only when it
+    // has no pre-existing enabled hardware breakpoints.
+    ctx.Dr6 &= ~kB0;
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
-bool CameraReProbe::arm_thread(DWORD thread_id) noexcept {
-    if (!target_ || thread_id == worker_thread_id_ || thread_id == GetCurrentThreadId()) return false;
+bool CameraReProbe::arm_thread(DWORD thread_id, ArmedThread& saved) noexcept {
+    if (!target_ || thread_id == worker_thread_id_ || thread_id == GetCurrentThreadId()) {
+        return false;
+    }
 
-    HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT |
-                                   THREAD_QUERY_INFORMATION,
-                               FALSE, thread_id);
+    HANDLE thread =
+        OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT,
+                   FALSE, thread_id);
     if (!thread) return false;
 
     bool armed = false;
@@ -269,34 +341,25 @@ bool CameraReProbe::arm_thread(DWORD thread_id) noexcept {
         if (suspend.ok()) {
             CONTEXT ctx{};
             ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-            if (GetThreadContext(thread, &ctx)) {
-                int selected = -1;
-                for (unsigned slot = 0; slot < 4; ++slot) {
-                    const auto enable_mask = std::uint64_t{3} << (slot * 2);
-                    const auto control_shift = 16u + slot * 4u;
-                    const auto control = (static_cast<std::uint64_t>(ctx.Dr7) >> control_shift) & 0xFu;
-                    if ((static_cast<std::uint64_t>(ctx.Dr7) & enable_mask) != 0 &&
-                        control == kWrite4ControlNibble && debug_register_value(ctx, slot) == target_) {
-                        selected = static_cast<int>(slot);
-                        break;
-                    }
-                    if (selected < 0 && (static_cast<std::uint64_t>(ctx.Dr7) & enable_mask) == 0) {
-                        selected = static_cast<int>(slot);
-                    }
-                }
 
-                if (selected >= 0) {
-                    const unsigned slot = static_cast<unsigned>(selected);
-                    const auto enable_shift = slot * 2u;
-                    const auto control_shift = 16u + slot * 4u;
-                    const auto enable_mask = std::uint64_t{3} << enable_shift;
-                    const auto control_mask = std::uint64_t{0xF} << control_shift;
-                    auto dr7 = static_cast<std::uint64_t>(ctx.Dr7);
-                    dr7 &= ~enable_mask;
-                    dr7 &= ~control_mask;
-                    dr7 |= std::uint64_t{1} << enable_shift; // local enable only
-                    dr7 |= kWrite4ControlNibble << control_shift;
-                    set_debug_register_value(ctx, slot, target_);
+            if (GetThreadContext(thread, &ctx)) {
+                const auto original_dr7 = static_cast<std::uint64_t>(ctx.Dr7);
+
+                // L0/G0 ... L3/G3 occupy DR7 bits 0..7. If any are enabled,
+                // leave the thread completely untouched.
+                if ((original_dr7 & 0xFFu) == 0) {
+                    saved.thread_id = thread_id;
+                    saved.original_dr0 = ctx.Dr0;
+                    saved.original_dr6 = ctx.Dr6;
+                    saved.original_dr7 = ctx.Dr7;
+
+                    auto dr7 = original_dr7;
+                    dr7 &= ~(std::uint64_t{3} << 0);       // clear L0/G0
+                    dr7 &= ~(std::uint64_t{0xF} << 16);    // clear R/W0+LEN0
+                    dr7 |= std::uint64_t{1} << 0;          // L0
+                    dr7 |= kWrite4ControlNibble << 16;     // write, 4 bytes
+
+                    ctx.Dr0 = target_;
                     ctx.Dr6 = 0;
                     ctx.Dr7 = dr7;
                     armed = SetThreadContext(thread, &ctx) != FALSE;
@@ -309,87 +372,73 @@ bool CameraReProbe::arm_thread(DWORD thread_id) noexcept {
     return armed;
 }
 
-void CameraReProbe::arm_new_threads() {
+std::size_t CameraReProbe::arm_existing_threads_once() noexcept {
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) return;
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
 
     const DWORD process_id = GetCurrentProcessId();
-    std::unordered_set<DWORD> live;
     THREADENTRY32 entry{};
     entry.dwSize = sizeof(entry);
+
     if (Thread32First(snapshot, &entry)) {
         do {
-            if (entry.th32OwnerProcessID != process_id) continue;
-            live.insert(entry.th32ThreadID);
-            if (!armed_threads_.contains(entry.th32ThreadID) &&
-                entry.th32ThreadID != worker_thread_id_) {
-                if (arm_thread(entry.th32ThreadID)) {
-                    armed_threads_.insert(entry.th32ThreadID);
-                }
+            if (entry.th32OwnerProcessID != process_id ||
+                entry.th32ThreadID == worker_thread_id_) {
+                continue;
+            }
+
+            ArmedThread saved{};
+            if (arm_thread(entry.th32ThreadID, saved)) {
+                armed_threads_.push_back(saved);
             }
         } while (Thread32Next(snapshot, &entry));
     }
-    CloseHandle(snapshot);
 
-    std::erase_if(armed_threads_, [&](DWORD id) { return !live.contains(id); });
+    CloseHandle(snapshot);
+    return armed_threads_.size();
 }
 
-void CameraReProbe::disarm_all_threads() noexcept {
-    if (!target_) return;
+void CameraReProbe::disarm_armed_threads() noexcept {
+    for (const auto& saved : armed_threads_) {
+        if (saved.thread_id == 0 || saved.thread_id == GetCurrentThreadId()) continue;
 
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) return;
+        HANDLE thread =
+            OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT,
+                       FALSE, saved.thread_id);
+        if (!thread) continue;
 
-    const DWORD process_id = GetCurrentProcessId();
-    const DWORD current_thread = GetCurrentThreadId();
-    THREADENTRY32 entry{};
-    entry.dwSize = sizeof(entry);
-    if (Thread32First(snapshot, &entry)) {
-        do {
-            if (entry.th32OwnerProcessID != process_id || entry.th32ThreadID == current_thread) continue;
-            HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT |
-                                           THREAD_QUERY_INFORMATION,
-                                       FALSE, entry.th32ThreadID);
-            if (!thread) continue;
-            {
-                ScopedSuspend suspend{thread};
-                if (suspend.ok()) {
-                    CONTEXT ctx{};
-                    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                    if (GetThreadContext(thread, &ctx)) {
-                        bool changed = false;
-                        auto dr7 = static_cast<std::uint64_t>(ctx.Dr7);
-                        for (unsigned slot = 0; slot < 4; ++slot) {
-                            const auto enable_shift = slot * 2u;
-                            const auto control_shift = 16u + slot * 4u;
-                            const auto enable_mask = std::uint64_t{3} << enable_shift;
-                            const auto control_mask = std::uint64_t{0xF} << control_shift;
-                            const auto control = (dr7 >> control_shift) & 0xFu;
-                            if ((dr7 & enable_mask) != 0 && control == kWrite4ControlNibble &&
-                                debug_register_value(ctx, slot) == target_) {
-                                dr7 &= ~enable_mask;
-                                dr7 &= ~control_mask;
-                                set_debug_register_value(ctx, slot, 0);
-                                changed = true;
-                            }
-                        }
-                        if (changed) {
-                            ctx.Dr6 = 0;
-                            ctx.Dr7 = dr7;
-                            SetThreadContext(thread, &ctx);
-                        }
+        {
+            ScopedSuspend suspend{thread};
+            if (suspend.ok()) {
+                CONTEXT ctx{};
+                ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+
+                if (GetThreadContext(thread, &ctx)) {
+                    const auto control =
+                        (static_cast<std::uint64_t>(ctx.Dr7) >> 16) & 0xFu;
+
+                    // Restore only if DR0 still looks exactly like our breakpoint.
+                    if ((static_cast<std::uint64_t>(ctx.Dr7) & 1u) != 0 &&
+                        control == kWrite4ControlNibble &&
+                        static_cast<std::uintptr_t>(ctx.Dr0) == target_) {
+                        ctx.Dr0 = saved.original_dr0;
+                        ctx.Dr6 = saved.original_dr6;
+                        ctx.Dr7 = saved.original_dr7;
+                        SetThreadContext(thread, &ctx);
                     }
                 }
             }
-            CloseHandle(thread);
-        } while (Thread32Next(snapshot, &entry));
+        }
+
+        CloseHandle(thread);
     }
-    CloseHandle(snapshot);
+
     armed_threads_.clear();
 }
 
 void CameraReProbe::flush_events() {
     if (!image_) return;
+
     while (next_flush_ < events_.size()) {
         auto& slot = events_[next_flush_];
         if (InterlockedCompareExchange(&slot.ready, 0, 0) == 0) break;
@@ -398,19 +447,27 @@ void CameraReProbe::flush_events() {
         const auto base = reinterpret_cast<std::uintptr_t>(image_->base);
         const auto trap_rva = event.trap_rip >= base ? event.trap_rip - base : 0;
         const auto function_rva = containing_function_rva(*image_, event.trap_rip);
+
         std::uintptr_t code_start_rva = 0;
         const auto bytes = hex_bytes(*image_, event.trap_rip, code_start_rva);
 
-        log::info("[camera-re] HIT #{} tid={} slot=DR{} flag {}->{} trap=+0x{:X} function=+0x{:X} dr6=0x{:X} dr7=0x{:X}",
-                  next_flush_ + 1, event.thread_id, event.slot,
-                  event.previous_value, event.current_value, trap_rva, function_rva,
-                  event.dr6, event.dr7);
-        log::info("[camera-re] regs rax={:016X} rbx={:016X} rcx={:016X} rdx={:016X} rsi={:016X} rdi={:016X} rbp={:016X} rsp={:016X}",
-                  event.regs[0], event.regs[1], event.regs[2], event.regs[3],
-                  event.regs[4], event.regs[5], event.regs[6], event.regs[7]);
-        log::info("[camera-re] regs r8={:016X} r9={:016X} r10={:016X} r11={:016X} r12={:016X} r13={:016X} r14={:016X} r15={:016X} rflags={:X}",
-                  event.regs[8], event.regs[9], event.regs[10], event.regs[11],
-                  event.regs[12], event.regs[13], event.regs[14], event.regs[15], event.rflags);
+        log::info(
+            "[camera-re] HIT #{} tid={} flag {}->{} trap=+0x{:X} function=+0x{:X} dr6=0x{:X} dr7=0x{:X}",
+            next_flush_ + 1, event.thread_id,
+            event.previous_value, event.current_value,
+            trap_rva, function_rva, event.dr6, event.dr7);
+
+        log::info(
+            "[camera-re] regs rax={:016X} rbx={:016X} rcx={:016X} rdx={:016X} rsi={:016X} rdi={:016X} rbp={:016X} rsp={:016X}",
+            event.regs[0], event.regs[1], event.regs[2], event.regs[3],
+            event.regs[4], event.regs[5], event.regs[6], event.regs[7]);
+
+        log::info(
+            "[camera-re] regs r8={:016X} r9={:016X} r10={:016X} r11={:016X} r12={:016X} r13={:016X} r14={:016X} r15={:016X} rflags={:X}",
+            event.regs[8], event.regs[9], event.regs[10], event.regs[11],
+            event.regs[12], event.regs[13], event.regs[14], event.regs[15],
+            event.rflags);
+
         if (!bytes.empty()) {
             log::info("[camera-re] code +0x{:X}: {}", code_start_rva, bytes);
         }
@@ -422,29 +479,49 @@ void CameraReProbe::flush_events() {
 
 void CameraReProbe::worker(std::stop_token stop) noexcept {
     worker_thread_id_ = GetCurrentThreadId();
+    auto deadline = std::chrono::steady_clock::time_point::max();
+
     try {
-        auto next_status = std::chrono::steady_clock::now();
-        while (!stop.stop_requested() && InterlockedCompareExchange(&enabled_, 0, 0) != 0) {
-            arm_new_threads();
+        while (!stop.stop_requested()) {
+            const bool enabled = InterlockedCompareExchange(&enabled_, 0, 0) != 0;
+
+            if (!enabled) {
+                if (consume_trigger() && begin_session()) {
+                    deadline = std::chrono::steady_clock::now() + kSessionTimeout;
+                }
+                std::this_thread::sleep_for(100ms);
+                continue;
+            }
+
             flush_events();
 
-            const auto now = std::chrono::steady_clock::now();
-            if (now >= next_status) {
-                log::trace("[camera-re] armed_threads={} captured_transitions={}",
-                           armed_threads_.size(), InterlockedCompareExchange(&next_event_, 0, 0));
-                next_status = now + std::chrono::seconds(5);
+            const LONG captured = InterlockedCompareExchange(&next_event_, 0, 0);
+            if (captured >= 2) {
+                end_session("captured two value-changing writes");
+                deadline = std::chrono::steady_clock::time_point::max();
+                continue;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+            if (std::chrono::steady_clock::now() >= deadline) {
+                end_session("20 second timeout");
+                deadline = std::chrono::steady_clock::time_point::max();
+                continue;
+            }
+
+            std::this_thread::sleep_for(50ms);
         }
     } catch (...) {
-        log::error("[camera-re] worker failed; disabling diagnostic probe");
+        log::error("[camera-re] worker failed");
     }
 
-    // Keep the VEH active while removing our DR slots. The worker is the only
-    // thread we deliberately never arm, so it can safely disarm every target
-    // thread before the owning bridge thread unregisters the handler.
-    disarm_all_threads();
-    try { flush_events(); } catch (...) {}
+    if (InterlockedCompareExchange(&enabled_, 0, 0) != 0 || veh_handle_) {
+        end_session("probe shutdown");
+    }
+
+    try {
+        flush_events();
+    } catch (...) {
+    }
 }
 
 } // namespace fh6r
