@@ -45,6 +45,7 @@ add_library(version SHARED
   src/audio_ring.cpp
   src/audio_state_probe.cpp
   src/cabin_dsp.cpp
+  src/camera_re_probe.cpp
   src/camera_tracker.cpp
   src/memory_diff.cpp
   src/media_session.cpp

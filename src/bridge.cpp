@@ -1,6 +1,7 @@
 #include "fh6r/audio_ring.hpp"
 #include "fh6r/audio_state_probe.hpp"
 #include "fh6r/config.hpp"
+#include "fh6r/camera_re_probe.hpp"
 #include "fh6r/fmod/controller.hpp"
 #include "fh6r/fmod/dsp_bridge.hpp"
 #include "fh6r/fmod/pe_image.hpp"
@@ -106,6 +107,7 @@ void run_bridge(HMODULE self) noexcept {
         AudioStateProbe probe{dsp, data_dir.string()};
         MemoryDiff memdiff{image};
         http::HttpServer http{cfg.dashboard_port, config, ring, capture, dsp, controller, probe, memdiff};
+        CameraReProbe camera_re_probe{image};
 
         // version.dll stays resident for the lifetime of the game. Keep all
         // services owned by this bootstrap thread; process teardown will end it.
