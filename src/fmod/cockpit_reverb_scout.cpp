@@ -10,6 +10,8 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace fh6r::fmod {
 namespace {
@@ -116,9 +118,44 @@ void dump_convolution(const FMODFns& fns, void* dsp, const std::string& out_dir)
               total > 0 ? 100.0 * e[3] / total : 0.0);
 }
 
+// Dump a single DSP node's identity: address, name, type, channel count and
+// input count. Marks interesting nodes (multi-input = likely send return,
+// named DSP, 4/8-channel format) so the graph skeleton is readable even though
+// the per-connection getters are dead-code-eliminated in this build.
+void dump_node(const FMODFns& fns, void* dsp, int index, int depth) noexcept {
+    char name[32]{};
+    std::uint32_t version = 0;
+    std::int32_t channels = -1, cw = -1, ch = -1;
+    if (fns.dsp_get_info)
+        seh_call([&] { fns.dsp_get_info(dsp, name, &version, &channels, &cw, &ch); });
+    name[31] = '\0';
+
+    std::int32_t t = -1;
+    if (fns.dsp_get_type) seh_call([&] { fns.dsp_get_type(dsp, &t); });
+
+    std::int32_t ninputs = -1;
+    if (fns.dsp_get_num_inputs) seh_call([&] { fns.dsp_get_num_inputs(dsp, &ninputs); });
+
+    std::string flags;
+    if (ninputs > 1) flags += " [MULTI-IN]";
+    if (t == kTypeConvolutionReverb) flags += " [CONV]";
+    if (t == 7) flags += " [FADER]";
+    const std::string_view nm{name};
+    auto has = [&](const char* kw) { return nm.find(kw) != std::string_view::npos; };
+    if (has("everb")) flags += " [REVERB]";
+    if (has("ader")) flags += " [FADERNAME]";
+    if (has("ixer")) flags += " [MIXER]";
+    if (has("eturn")) flags += " [RETURN]";
+    if (has("ockpit")) flags += " [COCKPIT]";
+    if (channels == 4 || channels == 8) flags += " [4/8CH]";
+
+    log::info("[graph] depth={} dsp[{}] addr=0x{:X} type={} ch={} inputs={} name='{}'{}",
+              depth, index, reinterpret_cast<std::uintptr_t>(dsp), t, channels, ninputs, name, flags);
+}
+
 void walk_group(const FMODFns& fns, void* group, int depth,
                 const std::string& out_dir) noexcept {
-    if (depth > kMaxDepth || g_found >= kMaxFound || !group) return;
+    if (depth > kMaxDepth || !group) return;
 
     if (fns.get_num_dsps && fns.get_dsp) {
         std::int32_t n = 0;
@@ -127,15 +164,27 @@ void walk_group(const FMODFns& fns, void* group, int depth,
         });
         if (ok && n > 0) {
             if (n > kMaxDSPs) n = kMaxDSPs;
+            // Collect this group's DSP chain and check for a convolution node.
+            struct Node { void* dsp; std::int32_t type; };
+            std::vector<Node> nodes;
+            nodes.reserve(static_cast<std::size_t>(n));
+            bool has_conv = false;
             for (std::int32_t i = 0; i < n; ++i) {
                 void* dsp = nullptr;
                 if (!seh_call([&] { fns.get_dsp(reinterpret_cast<std::uint64_t>(group), i, &dsp); }) || !dsp)
                     continue;
                 std::int32_t t = -1;
                 if (fns.dsp_get_type) seh_call([&] { fns.dsp_get_type(dsp, &t); });
-                if (t == kTypeConvolutionReverb) {
-                    log::info("[cockpit-reverb] found convolution DSP at depth={} dsp_index={}", depth, i);
-                    dump_convolution(fns, dsp, out_dir);
+                if (t == kTypeConvolutionReverb) has_conv = true;
+                nodes.push_back({dsp, t});
+            }
+            if (has_conv) {
+                log::info("[graph] === group depth={} has convolution reverb ({} DSPs) ===", depth, n);
+                for (std::size_t i = 0; i < nodes.size(); ++i) {
+                    dump_node(fns, nodes[i].dsp, static_cast<int>(i), depth);
+                    if (nodes[i].type == kTypeConvolutionReverb && g_found < kMaxFound) {
+                        dump_convolution(fns, nodes[i].dsp, out_dir);
+                    }
                 }
             }
         }

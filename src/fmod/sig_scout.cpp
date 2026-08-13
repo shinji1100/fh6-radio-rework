@@ -36,6 +36,8 @@ constexpr Desired kLowLevel[] = {
     {"DSP::getNumParameters",              "DSP num params"},
     {"DSP::getParameterFloat",             "DSP param float"},
     {"DSP::getParameterInt",               "DSP param int"},
+    {"DSP::getInfo",                       "DSP info"},
+    {"DSP::getNumInputs",                  "DSP num inputs"},
     {"System::getMasterChannelGroup",      "master channel group"},
     {"ChannelGroup::getNumGroups",         "group num groups"},
     {"ChannelGroup::getGroup",             "group get group"},

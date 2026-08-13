@@ -25,6 +25,10 @@ struct FMODFns {
     using DSPGetNumParameters = std::uint32_t (*)(void*, std::int32_t*);
     using DSPGetParameterFloat = std::uint32_t (*)(void*, std::int32_t, float*, char*, std::int32_t);
     using DSPGetParameterInt = std::uint32_t (*)(void*, std::int32_t, std::int32_t*, char*, std::int32_t);
+    // DSP graph node introspection (partial: getInput/getOutput and all
+    // DSPConnection getters are dead-code-eliminated in this build).
+    using DSPGetInfo = std::uint32_t (*)(void*, char*, std::uint32_t*, std::int32_t*, std::int32_t*, std::int32_t*);
+    using DSPGetNumInputs = std::uint32_t (*)(void*, std::int32_t*);
     // Cockpit reverb scout: channel-group tree traversal + convolution IR read.
     using SysGetMasterChannelGroup = std::uint32_t (*)(void*, void**);
     using GroupGetNumGroups = std::uint32_t (*)(void*, std::int32_t*);
@@ -43,6 +47,8 @@ struct FMODFns {
     DSPGetNumParameters dsp_get_num_parameters = nullptr;
     DSPGetParameterFloat dsp_get_parameter_float = nullptr;
     DSPGetParameterInt dsp_get_parameter_int = nullptr;
+    DSPGetInfo dsp_get_info = nullptr;
+    DSPGetNumInputs dsp_get_num_inputs = nullptr;
     SysGetMasterChannelGroup get_master_channel_group = nullptr;
     GroupGetNumGroups group_get_num_groups = nullptr;
     GroupGetGroup group_get_group = nullptr;

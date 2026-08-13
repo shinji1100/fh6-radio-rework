@@ -65,6 +65,10 @@ bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
         resolve_by_anchor_unique(img, "DSP::getParameterFloat"));
     out.dsp_get_parameter_int = reinterpret_cast<FMODFns::DSPGetParameterInt>(
         resolve_by_anchor_unique(img, "DSP::getParameterInt"));
+    out.dsp_get_info = reinterpret_cast<FMODFns::DSPGetInfo>(
+        resolve_by_anchor_unique(img, "DSP::getInfo"));
+    out.dsp_get_num_inputs = reinterpret_cast<FMODFns::DSPGetNumInputs>(
+        resolve_by_anchor_unique(img, "DSP::getNumInputs"));
     // Cockpit reverb scout: group-tree traversal + convolution IR read. Optional.
     out.get_master_channel_group = reinterpret_cast<FMODFns::SysGetMasterChannelGroup>(
         resolve_by_anchor_unique(img, "System::getMasterChannelGroup"));
