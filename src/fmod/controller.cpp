@@ -82,6 +82,7 @@ ControllerStats Controller::stats() const {
 
 void Controller::clear_target_state() noexcept {
     bridge_.clear_target();
+    metadata_.set_target(nullptr);
     std::scoped_lock lk{mu_};
     target_found_ = false;
     sound_name_.clear();
@@ -175,6 +176,7 @@ bool Controller::discover_target() noexcept {
     }
     bridge_.set_target(*active, active_system);
     bridge_.retarget_if_needed();
+    metadata_.set_target(active->sample_props_body);
     {
         std::scoped_lock lk{mu_};
         target_found_ = true;
@@ -183,6 +185,12 @@ bool Controller::discover_target() noexcept {
     if (changed)
         log::info("[controller] active Streamer Mode stream='{}'", active->sound_name);
     return true;
+}
+
+void Controller::update_metadata() noexcept {
+    MediaSessionProvider::Info info;
+    if (media_session_.info(info))
+        metadata_.update(info.title, info.artist);
 }
 
 void Controller::run(std::stop_token stop) noexcept {
@@ -204,6 +212,7 @@ void Controller::run(std::stop_token stop) noexcept {
             discover_target();
             next_discovery = now + (bridge_.stats().attached ? 2s : 1s);
         }
+        update_metadata();
         std::this_thread::sleep_for(100ms);
     }
     bridge_.clear_target();

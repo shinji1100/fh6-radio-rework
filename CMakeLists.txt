@@ -37,6 +37,7 @@ add_library(version SHARED
   src/audio_ring.cpp
   src/audio_state_probe.cpp
   src/memory_diff.cpp
+  src/media_session.cpp
   src/wasapi_capture.cpp
   src/http/http_server.cpp
   src/fmod/pe_image.cpp

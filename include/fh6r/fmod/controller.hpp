@@ -1,6 +1,8 @@
 #pragma once
 #include "fh6r/fmod/dsp_bridge.hpp"
+#include "fh6r/fmod/metadata_injector.hpp"
 #include "fh6r/fmod/pe_image.hpp"
+#include "fh6r/media_session.hpp"
 #include <mutex>
 #include <string>
 #include <thread>
@@ -26,9 +28,12 @@ private:
     bool discover_target() noexcept;
     bool refresh_station_gate() noexcept;
     void clear_target_state() noexcept;
+    void update_metadata() noexcept;
 
     DSPBridge& bridge_;
     const PEImage& image_;
+    MetadataInjector metadata_;
+    MediaSessionProvider media_session_;
     mutable std::mutex mu_;
     bool target_found_ = false;
     bool streamer_mode_ = false;
