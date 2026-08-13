@@ -197,8 +197,8 @@ label{display:block;margin:12px 0 6px;color:#abb5bf}select,input[type=range]{wid
 <label class="row"><input id="stereo" type="checkbox"> 原生双声道（实验性）</label>
 <p class="muted">默认关闭。关闭时保留 FMOD 原本的缓冲区声道结构，但向各声道写入同一个 mono 样本，避免 3D 电台通道的相位问题。</p></section>
 <section class="card"><h2>相机视角</h2>
-<p>插件当前视角：<b id="cam">—</b></p>
-<p class="muted">起始视角不固定，且计数可能与画面失同步。若插件显示与画面不符，点击下方实际视角完成同步；之后每次按相机键会按 仪表盘→引擎盖→保险杠→追尾1→追尾2→驾驶位 的顺序跟随。</p>
+<p>插件当前视角：<b id="cam">—</b> <span id="camStatus" class="muted"></span></p>
+<p class="muted">视角由游戏内 listener 几何自动判定并自愈，通常无需干预。同步按钮仅作调试兜底：点击即把当前几何簇标注为所选视角。</p>
 <div class="row">
 <button data-sync="dashboard">仪表盘</button><button data-sync="hood">引擎盖</button>
 <button data-sync="bumper">保险杠/车头</button><button data-sync="chase_near">追尾 1</button>
@@ -234,6 +234,7 @@ async function refresh(){try{state=await api('/api/state');$('capture').textCont
  $('gain').value=Math.round(state.config.gain*100);$('gainText').textContent=Math.round(state.config.gain*100)+'%';$('stereo').checked=state.config.native_stereo;
  $('diag').textContent=`设备: ${state.capture.device_name||'—'} · 捕获包: ${state.capture.packets} · 捕获帧: ${state.capture.frames_captured} · discontinuity: ${state.capture.discontinuities} · ring overflow: ${state.ring.overflow_frames} · DSP underrun: ${state.dsp.underrun_frames} · rebuffer: ${state.dsp.rebuffer_events} · callbacks: ${state.dsp.callbacks}`;
  $('cam').textContent=camLabels[state.controller.camera_view]||state.controller.camera_view;
+ const ap=state.dsp.applied||{};$('camStatus').textContent=`· ${state.controller.camera_anchored?'几何锚定':'未锚定'} · 簇 ${state.controller.camera_labeled}/${state.controller.camera_clusters} · 事件 ${state.controller.camera_events} · 应用: w=${(ap.width??0).toFixed(2)} g=${(ap.gain??0).toFixed(2)} lp=${Math.round(ap.cutoff_hz??0)}Hz mix=${(ap.mix??0).toFixed(2)}`;
  }catch(e){$('error').textContent=String(e)}}
 $('refresh').onclick=async()=>{await devices();await refresh()};$('apply').onclick=async()=>{await api('/api/device',{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:$('device').value});await refresh()};
 $('start').onclick=async()=>{await api('/api/capture/start',{method:'POST'});await refresh()};$('stop').onclick=async()=>{await api('/api/capture/stop',{method:'POST'});await refresh()};
@@ -300,9 +301,19 @@ struct HttpServer::Impl {
           << ",\"channel_handle\":" << ds.channel_handle << ",\"callbacks\":" << ds.callbacks
           << ",\"underrun_frames\":" << ds.underrun_frames << ",\"rebuffer_events\":" << ds.rebuffer_events
           << ",\"primed\":" << (ds.primed?"true":"false") << ",\"last_frames\":" << ds.last_frames
-          << ",\"last_channels\":" << ds.last_channels << "},\"controller\":{\"target_found\":" << (cs.target_found?"true":"false")
+          << ",\"last_channels\":" << ds.last_channels
+          << ",\"applied\":{\"mode\":\"" << cabin_mode_name(ds.applied.mode)
+          << "\",\"mix\":" << ds.applied.active_mix
+          << ",\"gain\":" << ds.applied.gain
+          << ",\"width\":" << ds.applied.width
+          << ",\"cutoff_hz\":" << ds.applied.cutoff_hz
+          << "}},\"controller\":{\"target_found\":" << (cs.target_found?"true":"false")
           << ",\"streamer_mode\":" << (cs.streamer_mode?"true":"false")
           << ",\"camera_view\":\"" << cabin_mode_name(cs.camera_view) << "\""
+          << ",\"camera_anchored\":" << (cs.camera_anchored?"true":"false")
+          << ",\"camera_labeled\":" << cs.camera_labeled_clusters
+          << ",\"camera_clusters\":" << cs.camera_clusters
+          << ",\"camera_events\":" << cs.camera_events
           << ",\"station_name\":\"" << json_escape(cs.station_name) << "\""
           << ",\"sound_name\":\"" << json_escape(cs.sound_name) << "\"}}";
         return o.str();

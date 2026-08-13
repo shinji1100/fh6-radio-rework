@@ -208,49 +208,25 @@ RVA 0x208C88: mov byte ptr [rip + ...], 0
 %TEMP%\fh6r-capstone
 ```
 
-## 5. 当前六态方案（HEAD `5622841`）
+## 5. 当前六态方案（闭环几何跟踪器，取代 5622841 的开环计数）
 
-### 5.1 视角跟踪
+### 5.1 视角跟踪（CameraTracker）
 
-`src/fmod/controller.cpp` 现在启动独立 10 ms 相机输入轮询线程，读取：
+`include/fh6r/camera_tracker.hpp` + `src/camera_tracker.cpp`，由 `src/fmod/controller.cpp` 的 100 Hz 相机线程驱动。真值来源是游戏自己的 FMOD listener 位姿（`System::get3DListenerAttributes`，启动时特征码/锚点解析，无硬编码地址），输入边沿（Tab/RB）只是辅助信号：
 
-- 键盘默认相机键：`Tab`
-- XInput 手柄：Right Shoulder / `RB`，用户 0–3
+- 切换事件 = 几何跳变（位置/朝向瞬时突变，超出平滑驾驶运动量）或输入边沿。
+- 在线聚类：运动补偿（慢 EMA 基线跟踪车身）后的相对位置 + fwd/up 方向。六个视角占五个几何簇（Dashboard 与 Cockpit 共享 listener 位姿，已实测）。
+- 环序标注：已确认循环 Dashboard→Hood→Bumper→ChaseNear→ChaseFar→Cockpit 映射到簇转移 I→H→B→N→F→I 加唯一自环 I→I（Cockpit→Dashboard）。因此观测转移序列即可绝对标注簇：自环证明 interior；进入 interior 证明 Cockpit；离开证明 Hood；外部跳变沿环传播。
+- 到达已标注簇即 snap 到绝对视角（自动纠错）。未收敛时退化为边沿计数，不劣于旧方案。
+- 自环 bootstrap：移动中 |rel| 半径先验（停车时失效，有速度门控）或跨两次访问的"无边沿跳变"确认；同一次访问内的菜单乱按不会误标注。
+- 矛盾防御：interior 的合法前驱只有 ChaseFar；自环只合法于 interior。违反即降级标签并退回计数，防止错误标注永久污染。
+- 换车（新 channel handle）时 reset：丢弃已学簇，重新收敛（约两个完整循环）。
 
-只在 FH6 窗口拥有前台焦点时计数。按下边沿触发一次，不按持续时间重复计数。
+手动 `POST /api/camera/sync` 保留为调试兜底，并会立即把当前簇标注为所选视角（加速收敛），但正常运行不依赖它。
 
-循环顺序（2026-08-14 用户确认，已修正此前假设）：
-
-```text
-Dashboard
-  -> Hood
-  -> Bumper
-  -> ChaseNear
-  -> ChaseFar
-  -> Cockpit
-  -> Dashboard
-```
-
-当插件发现新的 active radio channel handle 时，视角直接重置为 Dashboard。这样符合用户所说的“换车会黑屏，切换后从仪表盘开始，不需要淡化”。
-
-`GET /api/state` 现在返回：
-
-```json
-{
-  "controller": {
-    "camera_view": "dashboard"
-  }
-}
-```
-
-日志边沿格式：
-
-```text
-[camera] input edge -> chase_near
-[camera] input edge -> chase_far
-...
-[camera] reset -> dashboard
-```
+遥测（`GET /api/state`）：
+- `controller.camera_view / camera_anchored / camera_labeled / camera_clusters / camera_events`
+- `dsp.applied.{mode,mix,gain,width,cutoff_hz}`：当前实际作用于音频路径的平滑参数，用于证明视角切换确实生效。
 
 ### 5.2 每视角声学参数
 
@@ -258,26 +234,26 @@ Dashboard
 
 | 视角 | cabin_mix | wet_scale | stereo width | gain | low-pass |
 |---|---:|---:|---:|---:|---:|
-| Cockpit | 1.00 | 1.00 | 1.00 | 1.02 | 18 kHz |
-| Dashboard | 1.00 | 0.84 | 0.92 | 1.04 | 18 kHz |
+| Cockpit | 1.00 | 1.00 | 1.00 | 1.00 | 18 kHz |
+| Dashboard | 1.00 | 0.66 | 0.82 | 1.02 | 15.5 kHz |
 | Chase Near | 0.00 | 0.00 | 0.58 | 1.00 | 15 kHz |
 | Chase Far | 0.00 | 0.00 | 0.40 | 0.94 | 10.5 kHz |
 | Hood | 0.00 | 0.00 | 0.74 | 1.03 | 16.5 kHz |
 | Bumper | 0.00 | 0.00 | 0.62 | 1.00 | 13.5 kHz |
 
-四个外部视角不再是统一 unity bypass，而是做轻度距离低通、立体声收窄和响度差。参数刻意保守，因为 FH6 已经空间化车辆自身声音；本插件只处理外部音乐。
+Dashboard 对比度已提高到可闻阈以上（原 0.84/0.92 与 Cockpit 几乎不可区分，是"车内一套"听感的直接原因）。最终数值以 P1 等响度 A/B 为准。
 
 ## 6. 当前方案的风险边界
 
-`5622841` 已编译和测试通过，但写本文档时尚未完成实机六次按键验证。必须明确标为“实现完成、CI 通过、运行时待验证”。
+闭环跟踪器已通过便携单元测试（合成几何下的完整循环、错误起点自愈、菜单按键安全、改键恢复），但写本文档时尚未完成实机验证。必须明确标为“实现完成、单测通过、运行时待验证”。
 
 已知风险：
 
-1. 用户如果重映射了相机键，不再使用 `Tab` 或 XInput `RB`，计数器不会变化。
-2. 非 XInput 控制器若没有被 Steam/Input 映射成 XInput，RB 读取可能失效。
-3. 用户在菜单或非驾驶语境按 RB，虽然前台门控仍可能计数并造成不同步。
-4. 游戏若在不重建 radio channel 的情况下换车，Dashboard 自动重置可能漏掉。
-5. 游戏起始视角不固定（用户 2026-08-14 明确纠正，推翻此前“起始是 Dashboard”的记录），计数器可能启动即错位；必须用 `POST /api/camera/sync` 或控制台六个视角按钮手动同步。
+1. 聚类容差（`cluster_pos_m=1.6`、`cluster_dir=0.30`）是按估计设定的；Hood/Bumper 的真实几何间距若小于容差会被并簇（两者声学接近、相邻，影响有限，矛盾防御会阻止标注污染）。实机后用日志实测值校准。
+2. 菜单/回放等非驾驶相机几何会进入聚类（容量 8，最少观测回收）。若菜单相机恰好满足自环确认条件可能误标注；矛盾防御负责降级。
+3. 收敛前（约两个完整视角循环）退化为计数，仍受改键/手柄后台读取影响；收敛后几何锚定自动覆盖这些误差。
+4. 起始视角不固定（用户 2026-08-14 明确）：reset 默认 Dashboard 只是占位，首次几何接触/首个切换事件即开始纠正。
+5. 游戏若在不重建 radio channel 的情况下换车，簇重置可能漏掉；listener 几何仍在，重新聚类会自动恢复。
 
 推荐后续加固：
 
@@ -500,8 +476,9 @@ D:\Forza Horizon 6\fh6-radio-rework\backups
 - 不要把 18 个 Cockpit IR 全带宽直接卷到音乐上。
 - 不要把 anchor 字符串命中当成 FMOD API ABI 已验证。
 - 不要恢复手写 inline detour；此前出现过两次崩溃，当前参数 setter scout 是 read-only。
+- 不要恢复纯输入边沿开环计数作为唯一视角来源；它是本次失同步 bug 的根因，已被 CameraTracker 闭环取代。
 - 不要在游戏运行时覆盖 `version.dll`。
-- 不要把 CI 成功写成实机成功；`5622841` 仍需运行时闭环。
+- 不要把 CI 成功写成实机成功；闭环跟踪器仍需运行时闭环。
 
 ## 13. 接手文件顺序
 

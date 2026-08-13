@@ -1,4 +1,5 @@
 #pragma once
+#include "fh6r/camera_tracker.hpp"
 #include "fh6r/fmod/dsp_bridge.hpp"
 #include "fh6r/fmod/metadata_injector.hpp"
 #include "fh6r/fmod/pe_image.hpp"
@@ -16,6 +17,10 @@ struct ControllerStats {
     std::string station_name;
     std::string sound_name;
     CabinMode camera_view = CabinMode::Unknown;
+    bool camera_anchored = false;
+    int camera_labeled_clusters = 0;
+    int camera_clusters = 0;
+    std::uint64_t camera_events = 0;
 };
 
 class Controller {
@@ -25,16 +30,15 @@ public:
     Controller(const Controller&) = delete;
     Controller& operator=(const Controller&) = delete;
     ControllerStats stats() const;
-    // Manual resync: the starting camera is not guaranteed to be Dashboard, so
-    // the dashboard UI / API can tell the counter which view is actually shown.
+    // Manual resync (debug/fallback only; the tracker self-corrects in normal
+    // operation). Also teaches the tracker the current cluster's label.
     void sync_camera_view(CabinMode mode) noexcept;
 private:
     void run(std::stop_token stop) noexcept;
     bool discover_target() noexcept;
     bool refresh_station_gate() noexcept;
-    void refresh_camera_mode() noexcept;
     void camera_run(std::stop_token stop) noexcept;
-    void reset_camera_view() noexcept;
+    void apply_camera_view(CabinMode mode, const char* cause) noexcept;
     void clear_target_state() noexcept;
     void update_metadata() noexcept;
 
@@ -52,6 +56,7 @@ private:
     std::string sound_name_;
     void** radio_state_slot_ = nullptr;
     int radio_state_retry_ticks_ = 0;
+    CameraTracker camera_tracker_;
     std::atomic<CabinMode> camera_view_{CabinMode::Dashboard};
     bool camera_button_down_ = false;
     std::uint32_t camera_channel_handle_ = 0;

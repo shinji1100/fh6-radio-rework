@@ -92,6 +92,22 @@ public:
     void process(float& left, float& right) noexcept;
     void reset() noexcept;
 
+    // The smoothed per-view parameters actually acting on the audio path
+    // right now. Diagnostic telemetry: proves a view switch reached the DSP
+    // (vs. "switched but inaudible"). Written by the audio thread; readers
+    // get a torn-but-harmless snapshot.
+    struct AppliedView {
+        CabinMode mode = CabinMode::Unknown;
+        float active_mix = 0.0f;   // 0 = bypass, 1 = fully processed
+        float gain = 1.0f;
+        float width = 1.0f;
+        float cutoff_hz = 20000.0f;
+    };
+    AppliedView applied_view() const noexcept {
+        return {mode_.load(std::memory_order_acquire), mode_mix_state_,
+                view_gain_state_, view_width_state_, view_cutoff_state_};
+    }
+
 private:
     static constexpr int kSourceDelayLen = 2048; // 42.7 ms
     static constexpr int kSourceDelayMask = kSourceDelayLen - 1;

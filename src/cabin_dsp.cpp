@@ -80,8 +80,12 @@ struct ViewRender {
 
 constexpr ViewRender view_render(CabinMode mode) noexcept {
     switch (mode) {
-        case CabinMode::Cockpit:   return {1.0f, 1.00f, 1.00f, 1.02f, 18000.0f, 1.0f};
-        case CabinMode::Dashboard: return {1.0f, 0.84f, 0.92f, 1.04f, 18000.0f, 1.0f};
+        case CabinMode::Cockpit:   return {1.0f, 1.00f, 1.00f, 1.00f, 18000.0f, 1.0f};
+        // Dashboard must be clearly distinguishable from Cockpit: the previous
+        // values (wet 0.84 / width 0.92) sat below the just-noticeable
+        // difference, which read as "one interior sound". Drier, narrower and
+        // slightly darker; final levels pending loudness-matched A/B (P1).
+        case CabinMode::Dashboard: return {1.0f, 0.66f, 0.82f, 1.02f, 15500.0f, 1.0f};
         case CabinMode::ChaseNear: return {0.0f, 0.00f, 0.58f, 1.00f, 15000.0f, 1.0f};
         case CabinMode::ChaseFar:  return {0.0f, 0.00f, 0.40f, 0.94f, 10500.0f, 1.0f};
         case CabinMode::Hood:      return {0.0f, 0.00f, 0.74f, 1.03f, 16500.0f, 1.0f};

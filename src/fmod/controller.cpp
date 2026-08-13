@@ -80,20 +80,6 @@ bool camera_button_down() noexcept {
     return false;
 }
 
-CabinMode next_camera_view(CabinMode current) noexcept {
-    // User-confirmed FH6 driving-camera cycle (2026-08-14):
-    // Dashboard -> Hood -> Bumper -> Chase Near -> Chase Far -> Cockpit -> Dashboard.
-    switch (current) {
-        case CabinMode::Dashboard: return CabinMode::Hood;
-        case CabinMode::Hood: return CabinMode::Bumper;
-        case CabinMode::Bumper: return CabinMode::ChaseNear;
-        case CabinMode::ChaseNear: return CabinMode::ChaseFar;
-        case CabinMode::ChaseFar: return CabinMode::Cockpit;
-        case CabinMode::Cockpit: return CabinMode::Dashboard;
-        default: return CabinMode::Dashboard;
-    }
-}
-
 void** resolve_radio_state_slot(const PEImage& image) noexcept {
     auto* hit = find_by_pattern(image, kRadioSetStationByName);
     if (!hit) return nullptr;
@@ -151,6 +137,10 @@ ControllerStats Controller::stats() const {
     }
     s.dsp_attached = bridge_.stats().attached;
     s.camera_view = camera_view_.load(std::memory_order_acquire);
+    s.camera_anchored = camera_tracker_.anchored();
+    s.camera_labeled_clusters = camera_tracker_.labeled_clusters();
+    s.camera_clusters = camera_tracker_.cluster_count();
+    s.camera_events = camera_tracker_.events();
     return s;
 }
 
@@ -209,36 +199,50 @@ bool Controller::refresh_station_gate() noexcept {
     return true;
 }
 
-void Controller::refresh_camera_mode() noexcept {
-    const bool down = camera_button_down();
-    if (down && !camera_button_down_) {
-        const CabinMode next = next_camera_view(camera_view_.load(std::memory_order_acquire));
-        camera_view_.store(next, std::memory_order_release);
-        bridge_.set_cabin_mode(next);
-        log::info("[camera] input edge -> {}", cabin_mode_name(next));
-    }
-    camera_button_down_ = down;
+void Controller::apply_camera_view(CabinMode mode, const char* cause) noexcept {
+    camera_view_.store(mode, std::memory_order_release);
+    bridge_.set_cabin_mode(mode);
+    log::info("[camera] {} -> {}", cause, cabin_mode_name(mode));
 }
 
 void Controller::camera_run(std::stop_token stop) noexcept {
-    reset_camera_view();
+    camera_tracker_.reset(CabinMode::Dashboard);
     while (!stop.stop_requested()) {
-        refresh_camera_mode();
+        const bool down = camera_button_down();
+        const bool edge = down && !camera_button_down_;
+        camera_button_down_ = down;
+
+        // Ground truth: the game's own FMOD listener pose, resolved at
+        // runtime through pattern-scanned API entry points. Invalid when the
+        // stream is not attached; the tracker then degrades to edge counting.
+        CameraGeometry geo;
+        const auto& fns = bridge_.fns();
+        void* sys = (bridge_.channel_handle() != 0) ? bridge_.system() : nullptr;
+        if (sys && fns.get3d_listener_attrs) {
+            FMOD_VEC pos, vel, fwd, up;
+            std::uint32_t rc = ~0u;
+            if (seh_call([&] { rc = fns.get3d_listener_attrs(sys, 0, &pos, &vel, &fwd, &up); }) && rc == 0) {
+                geo.pos[0] = pos.x; geo.pos[1] = pos.y; geo.pos[2] = pos.z;
+                geo.fwd[0] = fwd.x; geo.fwd[1] = fwd.y; geo.fwd[2] = fwd.z;
+                geo.up[0] = up.x; geo.up[1] = up.y; geo.up[2] = up.z;
+                geo.valid = true;
+            }
+        }
+
+        const auto r = camera_tracker_.update(geo, 0.01f, edge);
+        if (r.switched) {
+            const char* cause = r.snapped ? "geometry anchor"
+                : (r.source == CameraTracker::EventSource::GeometryJump ? "geometry jump" : "input edge");
+            apply_camera_view(camera_tracker_.view(), cause);
+        }
         std::this_thread::sleep_for(10ms);
     }
 }
 
-void Controller::reset_camera_view() noexcept {
-    camera_view_.store(CabinMode::Dashboard, std::memory_order_release);
-    bridge_.set_cabin_mode(CabinMode::Dashboard);
-    log::info("[camera] reset -> dashboard");
-}
-
 void Controller::sync_camera_view(CabinMode mode) noexcept {
     if (mode == CabinMode::Unknown) return;
-    camera_view_.store(mode, std::memory_order_release);
-    bridge_.set_cabin_mode(mode);
-    log::info("[camera] manual sync -> {}", cabin_mode_name(mode));
+    camera_tracker_.set_view(mode);
+    apply_camera_view(mode, "manual sync");
 }
 
 bool Controller::discover_target() noexcept {
@@ -315,7 +319,9 @@ bool Controller::discover_target() noexcept {
     const auto channel = bridge_.channel_handle();
     if (channel != 0 && channel != camera_channel_handle_) {
         camera_channel_handle_ = channel;
-        reset_camera_view();
+        // Vehicle swap (loading blackout): drop learned clusters and re-anchor.
+        camera_tracker_.reset(CabinMode::Dashboard);
+        apply_camera_view(CabinMode::Dashboard, "reset");
     }
     metadata_.set_target(active->sample_props_body);
     {

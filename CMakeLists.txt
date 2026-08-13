@@ -26,6 +26,10 @@ if(FH6R_PORTABLE_TESTS_ONLY)
   add_executable(cabin_dsp_test tests/cabin_dsp_test.cpp src/cabin_dsp.cpp)
   target_include_directories(cabin_dsp_test PRIVATE include)
   add_test(NAME cabin_dsp COMMAND cabin_dsp_test)
+
+  add_executable(camera_tracker_test tests/camera_tracker_test.cpp src/camera_tracker.cpp)
+  target_include_directories(camera_tracker_test PRIVATE include)
+  add_test(NAME camera_tracker COMMAND camera_tracker_test)
   return()
 endif()
 
@@ -41,6 +45,7 @@ add_library(version SHARED
   src/audio_ring.cpp
   src/audio_state_probe.cpp
   src/cabin_dsp.cpp
+  src/camera_tracker.cpp
   src/memory_diff.cpp
   src/media_session.cpp
   src/wasapi_capture.cpp

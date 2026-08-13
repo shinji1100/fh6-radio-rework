@@ -163,6 +163,67 @@ int main() {
     assert(dsp.speaker_layout() == fh6r::SpeakerLayout::Surround8);
     assert(!dsp.set_speaker_layout_name("not-a-layout"));
 
+    // 12. Six-view distinguishability: each designed-to-differ view pair must
+    //     produce measurably different output from identical input. This is
+    //     the lab proof that a view switch reaches the audio path (the "one
+    //     interior / one exterior sound" complaint must be impossible).
+    {
+        struct Signature { double rms; double hf; };
+        auto run_view = [&](fh6r::CabinMode mode) {
+            dsp.set_profile(fh6r::CabinProfile::SportsCar);
+            dsp.set_speaker_layout(fh6r::SpeakerLayout::Premium6);
+            dsp.set_mode(mode);
+            dsp.reset();
+            std::uint32_t lfsr = 0x12345678u;
+            Signature s{};
+            float prev = 0.0f;
+            const int n = 48000;
+            for (int i = 0; i < n; ++i) {
+                // Deterministic pseudo-noise, identical for every view.
+                lfsr = lfsr * 1664525u + 1013904223u;
+                const float in = static_cast<float>(static_cast<int>(lfsr >> 9) & 0xFFFF) / 65536.0f - 0.5f;
+                float l = in * 0.6f, r = in * 0.4f;
+                dsp.process(l, r);
+                if (i > n / 2) { // settled only
+                    const float m = 0.5f * (l + r);
+                    s.rms += static_cast<double>(m) * m;
+                    const float d = m - prev;
+                    s.hf += static_cast<double>(d) * d;
+                    prev = m;
+                }
+            }
+            s.rms = std::sqrt(s.rms / (n / 2));
+            s.hf = std::sqrt(s.hf / (n / 2));
+            return s;
+        };
+        const auto cockpit = run_view(fh6r::CabinMode::Cockpit);
+        const auto dashboard = run_view(fh6r::CabinMode::Dashboard);
+        const auto chase_near = run_view(fh6r::CabinMode::ChaseNear);
+        const auto chase_far = run_view(fh6r::CabinMode::ChaseFar);
+        const auto hood = run_view(fh6r::CabinMode::Hood);
+        const auto bumper = run_view(fh6r::CabinMode::Bumper);
+
+        // Interior pair: Dashboard is drier/darker than Cockpit.
+        assert(std::fabs(cockpit.rms - dashboard.rms) > 1e-4 ||
+               std::fabs(cockpit.hf - dashboard.hf) > 1e-5);
+        // Exterior: ChaseFar is darker than ChaseNear (10.5k vs 15k LP).
+        assert(chase_far.hf < chase_near.hf * 0.95);
+        // Hood is brighter than Bumper (16.5k vs 13.5k LP).
+        assert(hood.hf > bumper.hf * 1.01);
+        // Interior vs exterior differ strongly.
+        assert(std::fabs(cockpit.rms - chase_near.rms) > 1e-3 ||
+               std::fabs(cockpit.hf - chase_near.hf) > 1e-4);
+        // Applied-view telemetry reflects the mode that was set.
+        dsp.set_mode(fh6r::CabinMode::ChaseFar);
+        dsp.reset();
+        for (int i = 0; i < 48000; ++i) { float l = 0.1f, r = 0.1f; dsp.process(l, r); }
+        const auto ap = dsp.applied_view();
+        assert(ap.mode == fh6r::CabinMode::ChaseFar);
+        assert(std::fabs(ap.width - 0.40f) < 0.05f);
+        assert(std::fabs(ap.cutoff_hz - 10500.0f) < 500.0f);
+        assert(ap.active_mix > 0.95f);
+    }
+
     std::puts("cabin_dsp_test: all checks passed");
     return 0;
 }

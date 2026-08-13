@@ -219,6 +219,7 @@ DSPStats DSPBridge::stats() const noexcept {
     s.primed = primed_.load(std::memory_order_relaxed);
     s.last_frames = last_frames_.load(std::memory_order_relaxed);
     s.last_channels = last_channels_.load(std::memory_order_relaxed);
+    s.applied = cabin_.applied_view();
     return s;
 }
 

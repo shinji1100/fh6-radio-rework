@@ -93,6 +93,8 @@ struct DSPStats {
     bool primed = false;
     std::uint32_t last_frames = 0;
     std::uint32_t last_channels = 0;
+    // Smoothed per-view parameters currently acting on the audio path.
+    CabinDSP::AppliedView applied;
 };
 
 class DSPBridge {
