@@ -4,6 +4,7 @@
 #include "fh6r/safe_mem.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -141,13 +142,25 @@ void dump_node(const FMODFns& fns, void* dsp, int index, int depth) noexcept {
     if (ninputs > 1) flags += " [MULTI-IN]";
     if (t == kTypeConvolutionReverb) flags += " [CONV]";
     if (t == 7) flags += " [FADER]";
-    const std::string_view nm{name};
-    auto has = [&](const char* kw) { return nm.find(kw) != std::string_view::npos; };
-    if (has("everb")) flags += " [REVERB]";
-    if (has("ader")) flags += " [FADERNAME]";
-    if (has("ixer")) flags += " [MIXER]";
-    if (has("eturn")) flags += " [RETURN]";
-    if (has("ockpit")) flags += " [COCKPIT]";
+    // Case-insensitive keyword highlight for the 2D/3D Music routing question.
+    std::string low;
+    low.reserve(32);
+    for (char c : std::string_view{name})
+        low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    auto has = [&](const char* kw) { return low.find(kw) != std::string::npos; };
+    if (has("radio")) flags += " [RADIO]";
+    if (has("music")) flags += " [MUSIC]";
+    if (has("3d")) flags += " [3D]";
+    if (has("emitter")) flags += " [EMITTER]";
+    if (has("panner") || has("pan")) flags += " [PANNER]";
+    if (has("lfe")) flags += " [LFE]";
+    if (has("blend")) flags += " [BLEND]";
+    if (has("spatial")) flags += " [SPATIAL]";
+    if (has("fader")) flags += " [FADERNAME]";
+    if (has("return")) flags += " [RETURN]";
+    if (has("mixer")) flags += " [MIXER]";
+    if (has("reverb")) flags += " [REVERB]";
+    if (has("cockpit")) flags += " [COCKPIT]";
     if (channels == 4 || channels == 8) flags += " [4/8CH]";
 
     log::info("[graph] depth={} dsp[{}] addr=0x{:X} type={} ch={} inputs={} name='{}'{}",
@@ -206,38 +219,55 @@ void walk_group(const FMODFns& fns, void* group, int depth,
     }
 }
 
-// Dump the full chain of the group that hosts the RadioStreamFmod channel.
-void dump_group_info(const FMODFns& fns, void* group, int depth, int channel_index) noexcept {
-    log::info("[radio-route] === group depth={} hosts RadioStreamFmod (channel #{}) ===", depth, channel_index);
+// Dump one channel's full DSP chain (a panner/spatializer can live on the
+// channel itself, not on any group).
+void dump_channel_chain(const FMODFns& fns, void* ch, int channel_index) noexcept {
+    log::info("[radio-route] CHANNEL #{} DSP CHAIN:", channel_index);
     if (fns.get_num_dsps && fns.get_dsp) {
         std::int32_t n = 0;
-        if (seh_call([&] { fns.get_num_dsps(reinterpret_cast<std::uint64_t>(group), &n); }) && n > 0) {
+        if (seh_call([&] { fns.get_num_dsps(reinterpret_cast<std::uint64_t>(ch), &n); }) && n > 0) {
             if (n > kMaxDSPs) n = kMaxDSPs;
             for (std::int32_t i = 0; i < n; ++i) {
                 void* dsp = nullptr;
-                if (!seh_call([&] { fns.get_dsp(reinterpret_cast<std::uint64_t>(group), i, &dsp); }) || !dsp) continue;
-                dump_node(fns, dsp, i, depth);
+                if (!seh_call([&] { fns.get_dsp(reinterpret_cast<std::uint64_t>(ch), i, &dsp); }) || !dsp) continue;
+                dump_node(fns, dsp, i, -1);
             }
         }
     }
-    if (fns.group_get_num_channels) {
-        std::int32_t nc = 0;
-        if (seh_call([&] { fns.group_get_num_channels(group, &nc); }))
-            log::info("[radio-route]   numChannels={}", nc);
-    }
-    if (fns.group_get_num_groups) {
-        std::int32_t ng = 0;
-        if (seh_call([&] { fns.group_get_num_groups(group, &ng); }))
-            log::info("[radio-route]   numChildGroups={}", ng);
+}
+
+// Dump the full group lineage (master -> ... -> host) with each group's DSP
+// chain. The DFS stack carries the parent info that getParentGroup would have
+// given us (it is dead-code-eliminated in this build).
+void dump_lineage(const FMODFns& fns, const std::vector<void*>& stack) noexcept {
+    log::info("[radio-route] GROUP LINEAGE ({} levels, index 0 = master):", stack.size());
+    for (std::size_t d = 0; d < stack.size(); ++d) {
+        void* g = stack[d];
+        const char* tag = (d + 1 == stack.size()) ? " [HOST]" : "";
+        log::info("[radio-route]   depth={} group=0x{:X}{}", d, reinterpret_cast<std::uintptr_t>(g), tag);
+        if (fns.get_num_dsps && fns.get_dsp) {
+            std::int32_t n = 0;
+            if (seh_call([&] { fns.get_num_dsps(reinterpret_cast<std::uint64_t>(g), &n); }) && n > 0) {
+                if (n > kMaxDSPs) n = kMaxDSPs;
+                for (std::int32_t i = 0; i < n; ++i) {
+                    void* dsp = nullptr;
+                    if (!seh_call([&] { fns.get_dsp(reinterpret_cast<std::uint64_t>(g), i, &dsp); }) || !dsp) continue;
+                    dump_node(fns, dsp, i, static_cast<int>(d));
+                }
+            }
+        }
     }
 }
 
 // Locate the RadioStreamFmod channel by finding our injected DSP (named
 // "FH6 Radio Rework") on some channel within the group tree. getParentGroup is
 // dead-code-eliminated, so instead of climbing up we enumerate every group's
-// channels and match on the DSP name. Returns true once found.
-bool trace_radio(const FMODFns& fns, void* group, int depth) noexcept {
+// channels and match on the DSP name, while the DFS stack records lineage.
+bool trace_radio(const FMODFns& fns, void* group, int depth,
+                 std::vector<void*>& stack) noexcept {
     if (depth > kMaxDepth || !group) return false;
+
+    stack.push_back(group);
 
     if (fns.group_get_num_channels && fns.group_get_channel) {
         std::int32_t nc = 0;
@@ -265,7 +295,9 @@ bool trace_radio(const FMODFns& fns, void* group, int depth) noexcept {
                     if (std::strcmp(name, "FH6 Radio Rework") == 0) {
                         log::info("[radio-route] FOUND RadioStreamFmod at depth={} channel_index={} dsp_index={}",
                                   depth, i, j);
-                        dump_group_info(fns, group, depth, i);
+                        dump_channel_chain(fns, ch, i);
+                        dump_lineage(fns, stack);
+                        stack.pop_back();
                         return true;
                     }
                 }
@@ -280,10 +312,11 @@ bool trace_radio(const FMODFns& fns, void* group, int depth) noexcept {
             for (std::int32_t i = 0; i < ng; ++i) {
                 void* child = nullptr;
                 if (!seh_call([&] { fns.group_get_group(group, i, &child); }) || !child) continue;
-                if (trace_radio(fns, child, depth + 1)) return true;
+                if (trace_radio(fns, child, depth + 1, stack)) { stack.pop_back(); return true; }
             }
         }
     }
+    stack.pop_back();
     return false;
 }
 
@@ -311,8 +344,11 @@ bool scout_cockpit_reverb(const FMODFns& fns, void* system,
     log::info("[cockpit-reverb] done: {} convolution DSP(s) found", g_found);
 
     // RadioStreamFmod-centered trace: find which group hosts our injected DSP
-    // and dump that group's chain to see the radio's downstream routing.
-    const bool found_radio = trace_radio(fns, master, 0);
+    // and dump that channel's chain + the full ancestor lineage to see the
+    // radio's downstream routing.
+    std::vector<void*> stack;
+    stack.reserve(static_cast<std::size_t>(kMaxDepth) + 1);
+    const bool found_radio = trace_radio(fns, master, 0, stack);
     log::info("[radio-route] trace done: radio group {}", found_radio ? "found" : "NOT found");
     return g_found > 0;
 }
