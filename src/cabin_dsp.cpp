@@ -70,17 +70,20 @@ struct Profile {
 };
 
 constexpr std::array<Profile, static_cast<int>(CabinProfile::Count)> kProfiles{{
-    {0.15f, 0.075f, 0.22f, 0.38f, 1.00f}, // Generic
-    {0.18f, 0.110f, 0.34f, 0.28f, 1.10f}, // Luxury
-    {0.10f, 0.045f, 0.13f, 0.52f, 0.82f}, // Race
-    {0.15f, 0.085f, 0.25f, 0.36f, 1.00f}, // Saloon
-    {0.13f, 0.065f, 0.19f, 0.43f, 0.91f}, // SportsCar
-    {0.21f, 0.125f, 0.42f, 0.25f, 1.24f}, // Van
+    {0.14f, 0.065f, 0.20f, 0.40f, 1.00f}, // Generic
+    {0.17f, 0.095f, 0.30f, 0.30f, 1.10f}, // Luxury
+    {0.09f, 0.038f, 0.12f, 0.54f, 0.84f}, // Race
+    {0.14f, 0.070f, 0.22f, 0.38f, 1.00f}, // Saloon
+    {0.12f, 0.052f, 0.17f, 0.46f, 0.92f}, // SportsCar
+    {0.19f, 0.105f, 0.34f, 0.28f, 1.18f}, // Van
 }};
 
 constexpr std::array<int, CabinDSP::kNumFdnLines> kFdnLengths{{997, 1259, 1601, 1999}};
-constexpr std::array<float, 6> kReflectionMs{{2.2f, 3.6f, 5.4f, 8.1f, 11.7f, 16.9f}};
-constexpr std::array<float, 6> kReflectionGain{{0.34f, 0.26f, 0.19f, 0.14f, 0.10f, 0.07f}};
+// Quantiles fitted from the non-sparse four-channel FH6 IR set. Only timing is
+// borrowed: their very large low-frequency transfer gain is inappropriate for
+// full-range music and is intentionally not copied into the radio EQ.
+constexpr std::array<float, 6> kReflectionMs{{2.4f, 3.9f, 5.4f, 6.9f, 8.3f, 13.0f}};
+constexpr std::array<float, 6> kReflectionGain{{0.30f, 0.24f, 0.19f, 0.15f, 0.11f, 0.08f}};
 
 float softclip(float x, float ceiling) noexcept {
     if (ceiling >= 1.0f) return std::clamp(x, -1.0f, 1.0f);
@@ -248,6 +251,7 @@ void CabinDSP::reset() noexcept {
     for (auto& stage : bq_z2_) { stage[0] = 0.0f; stage[1] = 0.0f; }
     source_pos_ = 0;
     openness_state_ = openness_.load(std::memory_order_acquire);
+    mode_mix_state_ = mode_.load(std::memory_order_acquire) == CabinMode::Cockpit ? 1.0f : 0.0f;
 }
 
 float CabinDSP::source_read(int channel, float delay) const noexcept {
@@ -280,6 +284,9 @@ float CabinDSP::run_head_shadow(int speaker, int ear, float x, float alpha) noex
 void CabinDSP::process(float& left, float& right) noexcept {
     left = std::clamp(left, -4.0f, 4.0f);
     right = std::clamp(right, -4.0f, 4.0f);
+
+    const float dry_l = left;
+    const float dry_r = right;
 
     const CabinMode mode = mode_.load(std::memory_order_relaxed);
     const int profile_index = std::clamp(static_cast<int>(profile_.load(std::memory_order_relaxed)),
@@ -344,6 +351,13 @@ void CabinDSP::process(float& left, float& right) noexcept {
     direct_l *= layout.normalization;
     direct_r *= layout.normalization;
 
+    // Keep the real stereo source as a stable perceptual anchor. A fully wet
+    // sum of several 2-6 ms virtual-speaker copies creates obvious combing on
+    // music and was the main reason the prototype sounded like a crude filter.
+    const float spatial_mix = binaural ? 0.88f : 0.32f;
+    direct_l = dry_l * (1.0f - spatial_mix) + direct_l * spatial_mix;
+    direct_r = dry_r * (1.0f - spatial_mix) + direct_r * spatial_mix;
+
     // Sparse, asymmetric early reflection field. Timing is scaled by profile;
     // opposite signs on alternating cross terms preserve spaciousness without
     // collapsing every reflection to correlated stereo.
@@ -383,8 +397,6 @@ void CabinDSP::process(float& left, float& right) noexcept {
 
     float wet = cabin_wet_.load(std::memory_order_relaxed);
     float refl = reflection_amount_.load(std::memory_order_relaxed);
-    if (mode == CabinMode::Exterior) { wet *= 0.12f; refl *= 0.20f; }
-    else if (mode == CabinMode::Unknown) { wet *= 0.55f; refl *= 0.60f; }
     wet *= 1.0f - 0.68f * openness;
 
     float out_l = direct_l + wet * (refl * profile.early_gain * early_l + profile.late_gain * late_l);
@@ -395,13 +407,20 @@ void CabinDSP::process(float& left, float& right) noexcept {
         const float eq_r = run_eq(profile_index, 1, out_r);
         // An open roof weakens the closed-cavity coloration. The slow openness
         // smoother also makes this coefficient transition click-free.
-        const float eq_mix = 1.0f - 0.72f * openness;
+        const float eq_mix = 0.68f * (1.0f - 0.72f * openness);
         out_l += eq_mix * (eq_l - out_l);
         out_r += eq_mix * (eq_r - out_r);
     }
 
-    left = softclip(out_l, ceiling);
-    right = softclip(out_r, ceiling);
+    // View changes are audible, so crossfade the processed cabin signal over
+    // about 40 ms. Exterior and unknown states are true unity-gain bypasses.
+    const float mode_target = mode == CabinMode::Cockpit ? 1.0f : 0.0f;
+    mode_mix_state_ += 0.00052f * (mode_target - mode_mix_state_);
+    const float mix = std::clamp(mode_mix_state_, 0.0f, 1.0f);
+    const float processed_l = softclip(out_l, ceiling);
+    const float processed_r = softclip(out_r, ceiling);
+    left = dry_l + mix * (processed_l - dry_l);
+    right = dry_r + mix * (processed_r - dry_r);
 }
 
 } // namespace fh6r

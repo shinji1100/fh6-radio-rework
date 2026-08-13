@@ -15,6 +15,8 @@ struct PESection {
 struct PEImage {
     std::byte* base = nullptr;
     std::size_t size = 0;
+    std::uint32_t time_date_stamp = 0;
+    std::uint32_t checksum = 0;
     std::byte* text = nullptr;
     std::byte* text_end = nullptr;
     std::byte* rdata = nullptr;

@@ -67,6 +67,20 @@ dashboard_port=8420
 
 `native_stereo=false` 是推荐默认值。它不会把 FMOD 的 mono buffer 强制改成 stereo；而是在 FMOD 已分配的通道布局内写入相同的 mono 内容。
 
+### Cabin DSP（实验性）
+
+`spatial_audio=true` 时，驾驶位与仪表盘两个座舱内视角使用虚拟扬声器、短早期反射、座舱 EQ 和短衰减尾声；两个追尾视角、引擎盖及保险杠/车头等四个外部视角自动 unity-gain bypass。视角切换约 40 ms 平滑过渡。自动识别带当前游戏版本指纹校验，版本不匹配时会安全旁路并写入日志，而不是读取未知地址。
+
+耳机可设置 `binaural=true`；普通立体声音箱保持 `false`。`cabin_wet` 建议从 `0.16` 开始，过高会让音乐明显像套用混响滤镜。修改配置后需要重启游戏。
+
+18 个提取 IR 的可复核分析位于 `analysis/cockpit_ir_metrics.json`，重跑命令：
+
+```powershell
+python tools/analyze_cockpit_irs.py ..\cockpit_ir_extracted --output-dir analysis
+```
+
+这些 IR 缺少运行时事件映射，当前仅采用可靠的反射时序与衰减统计；其强低频频响没有直接施加到音乐。
+
 ## 诊断
 
 中文控制台实时显示：

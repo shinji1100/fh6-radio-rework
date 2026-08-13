@@ -13,7 +13,7 @@ struct ConfigSnapshot {
     bool binaural = false;
     std::string cabin_profile = "sportscar";
     std::string speaker_layout = "premium6";
-    float cabin_wet = 0.18f;
+    float cabin_wet = 0.16f;
     float driver_offset = 0.35f;
     float head_width_m = 0.18f;
     float cabin_openness = 0.0f;

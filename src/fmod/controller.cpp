@@ -28,6 +28,15 @@ constexpr std::ptrdiff_t kStationChain0 = 0x40;
 constexpr std::ptrdiff_t kStationChain1 = 0x50;
 constexpr std::ptrdiff_t kStationName = 0x200;
 
+// Confirmed on the current FH6 executable by repeated six-view cycling. The
+// value is 1 for the two interior views (cockpit and dashboard) and 0 for the
+// four exterior views. Build fingerprinting makes this fail closed after an
+// update instead of interpreting an unrelated byte at a stale offset.
+constexpr std::uint32_t kCameraBuildTimestamp = 0x6A58A086u;
+constexpr std::uint32_t kCameraBuildChecksum = 0x0AF21AAAu;
+constexpr std::size_t kExpectedDataSize = 0x1CD9DA8u;
+constexpr std::size_t kCabinViewFlagOffset = 0x397C0u;
+
 void** resolve_radio_state_slot(const PEImage& image) noexcept {
     auto* hit = find_by_pattern(image, kRadioSetStationByName);
     if (!hit) return nullptr;
@@ -138,6 +147,61 @@ bool Controller::refresh_station_gate() noexcept {
     return true;
 }
 
+void Controller::refresh_camera_mode() noexcept {
+    if (camera_probe_disabled_) return;
+    if (!cabin_view_flag_) {
+        if (image_.time_date_stamp != kCameraBuildTimestamp || image_.checksum != kCameraBuildChecksum) {
+            log::warn("[camera] unsupported game build timestamp=0x{:08X} checksum=0x{:08X}; cabin auto-gating disabled",
+                      image_.time_date_stamp, image_.checksum);
+            bridge_.set_cabin_mode(CabinMode::Unknown);
+            camera_probe_disabled_ = true;
+            return;
+        }
+        for (const auto& section : image_.sections) {
+            const std::string_view name{section.name.data()};
+            const auto size = static_cast<std::size_t>(section.end - section.start);
+            if (name.starts_with(".data") && size == kExpectedDataSize &&
+                kCabinViewFlagOffset + sizeof(std::uint32_t) <= size) {
+                cabin_view_flag_ = section.start + kCabinViewFlagOffset;
+                break;
+            }
+        }
+        if (!cabin_view_flag_) {
+            log::warn("[camera] validated .data section not found; cabin auto-gating disabled");
+            bridge_.set_cabin_mode(CabinMode::Unknown);
+            camera_probe_disabled_ = true;
+            return;
+        }
+        log::info("[camera] read-only cabin flag=0x{:X} (validated build)",
+                  reinterpret_cast<std::uintptr_t>(cabin_view_flag_));
+    }
+
+    std::uint32_t raw = 2;
+    if (!safe_read(cabin_view_flag_, raw) || raw > 1) {
+        if (++invalid_cabin_ticks_ == 10) {
+            log::warn("[camera] cabin flag invalid for 1s; bypassing CabinDSP");
+            bridge_.set_cabin_mode(CabinMode::Unknown);
+            camera_mode_initialized_ = false;
+        }
+        return;
+    }
+    invalid_cabin_ticks_ = 0;
+    if (raw != pending_cabin_view_) {
+        pending_cabin_view_ = raw;
+        pending_cabin_ticks_ = 1;
+        return;
+    }
+    if (pending_cabin_ticks_ < 3) ++pending_cabin_ticks_;
+    if (pending_cabin_ticks_ < 3) return; // 300 ms debounce rejects transition noise
+
+    const CabinMode mode = raw ? CabinMode::Cockpit : CabinMode::Exterior;
+    if (!camera_mode_initialized_ || bridge_.cabin_mode() != mode) {
+        bridge_.set_cabin_mode(mode);
+        camera_mode_initialized_ = true;
+        log::info("[camera] view acoustics -> {}", raw ? "interior" : "exterior/bypass");
+    }
+}
+
 bool Controller::discover_target() noexcept {
     const auto disc = discover_radio_instances(image_);
     const RadioInstance* active = nullptr;
@@ -231,6 +295,7 @@ void Controller::run(std::stop_token stop) noexcept {
     auto next_discovery = std::chrono::steady_clock::now();
     while (!stop.stop_requested()) {
         const auto now = std::chrono::steady_clock::now();
+        refresh_camera_mode();
 
         // Station selection is cheap to poll. It is the safety gate that keeps
         // normal FH6 stations untouched when Streamer Mode is not selected.

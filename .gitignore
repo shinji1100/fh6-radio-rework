@@ -1,6 +1,7 @@
 /build/
 /out/
 /artifacts/
+/analysis-check/
 __pycache__/
 *.user
 *.suo

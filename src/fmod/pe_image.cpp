@@ -14,6 +14,8 @@ PEImage parse(std::byte* base) {
     if (nt->Signature != IMAGE_NT_SIGNATURE) return img;
     img.base = base;
     img.size = nt->OptionalHeader.SizeOfImage;
+    img.time_date_stamp = nt->FileHeader.TimeDateStamp;
+    img.checksum = nt->OptionalHeader.CheckSum;
     auto* sec = IMAGE_FIRST_SECTION(nt);
     img.sections.reserve(nt->FileHeader.NumberOfSections);
     for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {

@@ -90,7 +90,7 @@ private:
     void build_eq_banks() noexcept;
     void build_fdn_feedback() noexcept;
 
-    std::atomic<CabinMode> mode_{CabinMode::Cockpit};
+    std::atomic<CabinMode> mode_{CabinMode::Unknown};
     std::atomic<CabinProfile> profile_{CabinProfile::SportsCar};
     std::atomic<SpeakerLayout> layout_{SpeakerLayout::Premium6};
     std::atomic<bool> binaural_{false};
@@ -120,6 +120,7 @@ private:
     Biquad eq_[static_cast<int>(CabinProfile::Count)][kNumEqStages]{};
 
     float openness_state_ = 0.0f;
+    float mode_mix_state_ = 0.0f;
 };
 
 const char* cabin_profile_name(CabinProfile profile) noexcept;

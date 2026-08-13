@@ -43,14 +43,26 @@ int main() {
         assert(peak > 0.0f);
     }
 
-    // 3. Exterior peak differs from Cockpit peak (distinct, quieter reverb tail).
+    // 3. Exterior is a true unity-gain bypass after the short view crossfade.
     {
-        const float cp = run_tone(dsp, fh6r::CabinMode::Cockpit, 48000);
-        const float ep = run_tone(dsp, fh6r::CabinMode::Exterior, 48000);
-        assert(std::fabs(cp - ep) > 1e-4f);
+        dsp.set_mode(fh6r::CabinMode::Cockpit);
+        dsp.reset();
+        for (int i = 0; i < 24000; ++i) {
+            float l = 0.3f, r = -0.2f;
+            dsp.process(l, r);
+        }
+        dsp.set_mode(fh6r::CabinMode::Exterior);
+        float l = 0.3f, r = -0.2f;
+        for (int i = 0; i < 48000; ++i) {
+            l = 0.3f;
+            r = -0.2f;
+            dsp.process(l, r);
+        }
+        assert(std::fabs(l - 0.3f) < 1e-4f);
+        assert(std::fabs(r + 0.2f) < 1e-4f);
     }
 
-    // 4. Unknown mode produces a finite, bounded signal (fail-safe default).
+    // 4. Unknown mode fails safe to bypass and remains finite/bounded.
     {
         const float up = run_tone(dsp, fh6r::CabinMode::Unknown, 48000);
         assert(up <= 1.001f);

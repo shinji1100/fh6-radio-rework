@@ -27,6 +27,7 @@ private:
     void run(std::stop_token stop) noexcept;
     bool discover_target() noexcept;
     bool refresh_station_gate() noexcept;
+    void refresh_camera_mode() noexcept;
     void clear_target_state() noexcept;
     void update_metadata() noexcept;
 
@@ -44,6 +45,12 @@ private:
     std::string sound_name_;
     void** radio_state_slot_ = nullptr;
     int radio_state_retry_ticks_ = 0;
+    std::byte* cabin_view_flag_ = nullptr;
+    std::uint32_t pending_cabin_view_ = 2;
+    int pending_cabin_ticks_ = 0;
+    int invalid_cabin_ticks_ = 0;
+    bool camera_mode_initialized_ = false;
+    bool camera_probe_disabled_ = false;
     std::jthread thread_;
 };
 } // namespace fh6r::fmod

@@ -111,6 +111,8 @@ public:
     void set_native_stereo(bool on) noexcept { native_stereo_.store(on, std::memory_order_release); }
     void set_spatial_audio(bool on) noexcept { spatial_audio_.store(on, std::memory_order_release); }
     void set_binaural(bool on) noexcept { cabin_.set_binaural(on); }
+    void set_cabin_mode(CabinMode mode) noexcept { cabin_.set_mode(mode); }
+    CabinMode cabin_mode() const noexcept { return cabin_.mode(); }
     bool set_cabin_profile(std::string_view name) noexcept;
     bool set_speaker_layout(std::string_view name) noexcept;
     void set_cabin_wet(float v) noexcept { cabin_.set_cabin_wet(v); }
