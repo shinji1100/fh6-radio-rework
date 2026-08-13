@@ -140,6 +140,7 @@ void dump_hex(std::byte* p, int n, const char* tag) {
 struct RcxTrace {
     bool resolved = false;
     bool global_load = false;   // true: base = *(global); false: base = global (address)
+    bool deref_boundary = false; // hit mov reg,[base+disp] — not algebraically flattenable
     std::byte* global = nullptr;
     int disp = 0;
 };
@@ -182,10 +183,14 @@ RcxTrace trace_rcx_addr(std::byte* call_site) noexcept {
                 reg = insn.src_reg;
                 pos = q;
             } else if (insn.src_is_mem && insn.base >= 0) {
-                log::info("[studio-system]   {} = *[{}+0x{:X}] (load; tracing base)", reg_name(reg), reg_name(insn.base), insn.disp);
-                out.disp += insn.disp;
-                reg = insn.base;
-                pos = q;
+                // mov reg,[base+disp] is a memory LOAD: reg = *(base+disp). This is a
+                // dereference boundary — the displacement cannot be accumulated like
+                // a lea (*(base+disp) != base+disp). Stop flattening here instead of
+                // producing a plausible-but-wrong slot address.
+                log::info("[studio-system]   {} = *[{}+0x{:X}] [DEREF boundary, stop]",
+                          reg_name(reg), reg_name(insn.base), insn.disp);
+                out.deref_boundary = true;
+                return out;
             } else {
                 log::info("[studio-system]   {} = (unrecognized writer)", reg_name(reg));
                 return out;
@@ -203,6 +208,10 @@ RcxTrace trace_rcx_addr(std::byte* call_site) noexcept {
 // it derives. Returns the handle, or nullptr (not resolved / not yet populated).
 std::byte* read_handle_from_site(std::byte* site) noexcept {
     RcxTrace tr = trace_rcx_addr(site);
+    if (tr.deref_boundary) {
+        log::info("[studio-system]   (deref boundary hit — cannot flatten to a simple base+disp slot)");
+        return nullptr;
+    }
     if (!tr.resolved || !tr.global) return nullptr;
 
     std::byte* base = nullptr;
