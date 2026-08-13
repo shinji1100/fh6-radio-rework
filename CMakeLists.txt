@@ -22,6 +22,10 @@ if(FH6R_PORTABLE_TESTS_ONLY)
   add_executable(drift_control_test tests/drift_control_test.cpp)
   target_include_directories(drift_control_test PRIVATE include)
   add_test(NAME drift_control COMMAND drift_control_test)
+
+  add_executable(cabin_dsp_test tests/cabin_dsp_test.cpp src/cabin_dsp.cpp)
+  target_include_directories(cabin_dsp_test PRIVATE include)
+  add_test(NAME cabin_dsp COMMAND cabin_dsp_test)
   return()
 endif()
 
@@ -36,6 +40,7 @@ add_library(version SHARED
   src/config.cpp
   src/audio_ring.cpp
   src/audio_state_probe.cpp
+  src/cabin_dsp.cpp
   src/memory_diff.cpp
   src/media_session.cpp
   src/wasapi_capture.cpp
