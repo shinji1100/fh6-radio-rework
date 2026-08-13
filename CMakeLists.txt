@@ -49,6 +49,7 @@ add_library(version SHARED
   src/fmod/sig_scanner.cpp
   src/fmod/sig_scout.cpp
   src/fmod/studio_probe.cpp
+  src/fmod/studio_api_scout.cpp
   src/fmod/studio_param_hook.cpp
   src/fmod/cockpit_reverb_scout.cpp
   src/fmod/event_instance_probe.cpp

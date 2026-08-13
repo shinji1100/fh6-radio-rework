@@ -5,6 +5,7 @@
 #include "fh6r/fmod/dsp_bridge.hpp"
 #include "fh6r/fmod/pe_image.hpp"
 #include "fh6r/fmod/sig_scout.hpp"
+#include "fh6r/fmod/studio_api_scout.hpp"
 #include "fh6r/fmod/studio_param_hook.hpp"
 #include "fh6r/fmod/studio_probe.hpp"
 #include "fh6r/http/http_server.hpp"
@@ -60,10 +61,15 @@ void run_bridge(HMODULE self) noexcept {
         // state enumerator. Read-only, runs once at startup.
         if (image.valid()) fmod::scout_apis(image);
 
-        // Phase 1 (Studio path): locate the FMOD Studio System and resolve the
-        // parameter getters, so the next iteration can enumerate global
-        // parameters and find the interior/exterior signal. Read-only.
-        if (image.valid()) fmod::studio_scout(image);
+        // Phase 1 (Studio path, superseded): the old vtable-reverse-lookup
+        // locate_studio_system is retired — Studio objects are packed handles,
+        // not vtable objects, so that approach was premised wrong.
+        // if (image.valid()) fmod::studio_scout(image);
+
+        // Studio enumeration route, Step 1: resolve the 13 Studio APIs and report
+        // MISSING / RESOLVED / AMBIGUOUS per anchor. Read-only; no API is called
+        // and no object memory is inspected (only address reliability).
+        if (image.valid()) fmod::scout_studio_api(image);
 
         // Phase 1 (interior/exterior state): observe the FMOD Studio parameter
         // setters (read-only detour) to confirm the "Cockpit" global parameter

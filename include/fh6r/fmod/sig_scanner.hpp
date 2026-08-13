@@ -21,6 +21,13 @@ std::vector<std::byte*> scout_anchor(const PEImage& img, std::string_view anchor
 // non-unique across FMOD's shared prologues) is needed.
 std::byte* resolve_by_anchor_unique(const PEImage& img, std::string_view anchor) noexcept;
 
+// Like scout_anchor, but filters out the shared Studio logging/dispatch
+// function that references every Studio name string (prologue
+// "48 89 5C 24 18 55 56 57"). Returns the remaining candidates — may be 0
+// (MISSING), 1 (RESOLVED) or many (AMBIGUOUS). Does NOT require uniqueness, so
+// callers can report the exact candidate count instead of a bare success/fail.
+std::vector<std::byte*> scout_studio_anchor(const PEImage& img, std::string_view anchor) noexcept;
+
 // Resolve a FMOD Studio method by anchor, filtering out the shared logging/
 // dispatch function that references every Studio name string (prologue
 // "48 89 5C 24 18 55 56 57"). Returns the unique remaining candidate, or
