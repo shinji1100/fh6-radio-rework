@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <windows.h>
 
 namespace fh6r::fmod {
 namespace {
@@ -28,14 +29,70 @@ constexpr std::ptrdiff_t kStationChain0 = 0x40;
 constexpr std::ptrdiff_t kStationChain1 = 0x50;
 constexpr std::ptrdiff_t kStationName = 0x200;
 
-// Confirmed on the current FH6 executable by repeated six-view cycling. The
-// value is 1 for the two interior views (cockpit and dashboard) and 0 for the
-// four exterior views. Build fingerprinting makes this fail closed after an
-// update instead of interpreting an unrelated byte at a stale offset.
-constexpr std::uint32_t kCameraBuildTimestamp = 0x6A58A086u;
-constexpr std::uint32_t kCameraBuildChecksum = 0x0AF21AAAu;
-constexpr std::size_t kExpectedDataSize = 0x1CD9DA8u;
-constexpr std::size_t kCabinViewFlagOffset = 0x397C0u;
+constexpr WORD kXInputGamepadRightShoulder = 0x0200;
+
+struct XInputGamepad {
+    WORD buttons;
+    BYTE left_trigger;
+    BYTE right_trigger;
+    SHORT thumb_lx;
+    SHORT thumb_ly;
+    SHORT thumb_rx;
+    SHORT thumb_ry;
+};
+
+struct XInputState { DWORD packet_number; XInputGamepad gamepad; };
+using XInputGetStateFn = DWORD (WINAPI*)(DWORD, XInputState*);
+
+XInputGetStateFn resolve_xinput_get_state() noexcept {
+    static const auto fn = []() noexcept -> XInputGetStateFn {
+        constexpr const wchar_t* names[]{L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"};
+        for (const auto* name : names) {
+            HMODULE module = GetModuleHandleW(name);
+            if (!module) module = LoadLibraryW(name);
+            if (module) {
+                if (const auto proc = GetProcAddress(module, "XInputGetState"))
+                    return reinterpret_cast<XInputGetStateFn>(proc);
+            }
+        }
+        return nullptr;
+    }();
+    return fn;
+}
+
+bool game_has_focus() noexcept {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    return pid == GetCurrentProcessId();
+}
+
+bool camera_button_down() noexcept {
+    if (!game_has_focus()) return false;
+    if ((GetAsyncKeyState(VK_TAB) & 0x8000) != 0) return true;
+    if (const auto get_state = resolve_xinput_get_state()) {
+        for (DWORD user = 0; user < 4; ++user) {
+            XInputState state{};
+            if (get_state(user, &state) == ERROR_SUCCESS &&
+                (state.gamepad.buttons & kXInputGamepadRightShoulder) != 0)
+                return true;
+        }
+    }
+    return false;
+}
+
+CabinMode next_camera_view(CabinMode current) noexcept {
+    // Forza driving-camera order: Driver/Dashboard -> Chase Near -> Chase Far
+    // -> Bumper -> Hood -> Cockpit -> Driver/Dashboard.
+    switch (current) {
+        case CabinMode::Dashboard: return CabinMode::ChaseNear;
+        case CabinMode::ChaseNear: return CabinMode::ChaseFar;
+        case CabinMode::ChaseFar: return CabinMode::Bumper;
+        case CabinMode::Bumper: return CabinMode::Hood;
+        case CabinMode::Hood: return CabinMode::Cockpit;
+        case CabinMode::Cockpit: return CabinMode::Dashboard;
+        default: return CabinMode::Dashboard;
+    }
+}
 
 void** resolve_radio_state_slot(const PEImage& image) noexcept {
     auto* hit = find_by_pattern(image, kRadioSetStationByName);
@@ -73,9 +130,13 @@ bool read_station_name(void** slot, std::string& out) noexcept {
 } // namespace
 
 Controller::Controller(DSPBridge& bridge, const PEImage& image)
-    : bridge_{bridge}, image_{image}, thread_{[this](std::stop_token s) { run(s); }} {}
+    : bridge_{bridge}, image_{image},
+      camera_thread_{[this](std::stop_token s) { camera_run(s); }},
+      thread_{[this](std::stop_token s) { run(s); }} {}
 Controller::~Controller() {
+    camera_thread_.request_stop();
     thread_.request_stop();
+    if (camera_thread_.joinable()) camera_thread_.join();
     if (thread_.joinable()) thread_.join();
 }
 
@@ -89,6 +150,7 @@ ControllerStats Controller::stats() const {
         s.sound_name = sound_name_;
     }
     s.dsp_attached = bridge_.stats().attached;
+    s.camera_view = camera_view_.load(std::memory_order_acquire);
     return s;
 }
 
@@ -148,58 +210,28 @@ bool Controller::refresh_station_gate() noexcept {
 }
 
 void Controller::refresh_camera_mode() noexcept {
-    if (camera_probe_disabled_) return;
-    if (!cabin_view_flag_) {
-        if (image_.time_date_stamp != kCameraBuildTimestamp || image_.checksum != kCameraBuildChecksum) {
-            log::warn("[camera] unsupported game build timestamp=0x{:08X} checksum=0x{:08X}; cabin auto-gating disabled",
-                      image_.time_date_stamp, image_.checksum);
-            bridge_.set_cabin_mode(CabinMode::Unknown);
-            camera_probe_disabled_ = true;
-            return;
-        }
-        for (const auto& section : image_.sections) {
-            const std::string_view name{section.name.data()};
-            const auto size = static_cast<std::size_t>(section.end - section.start);
-            if (name.starts_with(".data") && size == kExpectedDataSize &&
-                kCabinViewFlagOffset + sizeof(std::uint32_t) <= size) {
-                cabin_view_flag_ = section.start + kCabinViewFlagOffset;
-                break;
-            }
-        }
-        if (!cabin_view_flag_) {
-            log::warn("[camera] validated .data section not found; cabin auto-gating disabled");
-            bridge_.set_cabin_mode(CabinMode::Unknown);
-            camera_probe_disabled_ = true;
-            return;
-        }
-        log::info("[camera] read-only cabin flag=0x{:X} (validated build)",
-                  reinterpret_cast<std::uintptr_t>(cabin_view_flag_));
+    const bool down = camera_button_down();
+    if (down && !camera_button_down_) {
+        const CabinMode next = next_camera_view(camera_view_.load(std::memory_order_acquire));
+        camera_view_.store(next, std::memory_order_release);
+        bridge_.set_cabin_mode(next);
+        log::info("[camera] input edge -> {}", cabin_mode_name(next));
     }
+    camera_button_down_ = down;
+}
 
-    std::uint32_t raw = 2;
-    if (!safe_read(cabin_view_flag_, raw) || raw > 1) {
-        if (++invalid_cabin_ticks_ == 10) {
-            log::warn("[camera] cabin flag invalid for 1s; bypassing CabinDSP");
-            bridge_.set_cabin_mode(CabinMode::Unknown);
-            camera_mode_initialized_ = false;
-        }
-        return;
+void Controller::camera_run(std::stop_token stop) noexcept {
+    reset_camera_view();
+    while (!stop.stop_requested()) {
+        refresh_camera_mode();
+        std::this_thread::sleep_for(10ms);
     }
-    invalid_cabin_ticks_ = 0;
-    if (raw != pending_cabin_view_) {
-        pending_cabin_view_ = raw;
-        pending_cabin_ticks_ = 1;
-        return;
-    }
-    if (pending_cabin_ticks_ < 3) ++pending_cabin_ticks_;
-    if (pending_cabin_ticks_ < 3) return; // 300 ms debounce rejects transition noise
+}
 
-    const CabinMode mode = raw ? CabinMode::Cockpit : CabinMode::Exterior;
-    if (!camera_mode_initialized_ || bridge_.cabin_mode() != mode) {
-        bridge_.set_cabin_mode(mode);
-        camera_mode_initialized_ = true;
-        log::info("[camera] view acoustics -> {}", raw ? "interior" : "exterior/bypass");
-    }
+void Controller::reset_camera_view() noexcept {
+    camera_view_.store(CabinMode::Dashboard, std::memory_order_release);
+    bridge_.set_cabin_mode(CabinMode::Dashboard);
+    log::info("[camera] reset -> dashboard");
 }
 
 bool Controller::discover_target() noexcept {
@@ -273,6 +305,11 @@ bool Controller::discover_target() noexcept {
 
     bridge_.set_target(*active, active_system);
     bridge_.retarget_if_needed();
+    const auto channel = bridge_.channel_handle();
+    if (channel != 0 && channel != camera_channel_handle_) {
+        camera_channel_handle_ = channel;
+        reset_camera_view();
+    }
     metadata_.set_target(active->sample_props_body);
     {
         std::scoped_lock lk{mu_};
@@ -295,8 +332,6 @@ void Controller::run(std::stop_token stop) noexcept {
     auto next_discovery = std::chrono::steady_clock::now();
     while (!stop.stop_requested()) {
         const auto now = std::chrono::steady_clock::now();
-        refresh_camera_mode();
-
         // Station selection is cheap to poll. It is the safety gate that keeps
         // normal FH6 stations untouched when Streamer Mode is not selected.
         if (!refresh_station_gate()) {

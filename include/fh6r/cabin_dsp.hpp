@@ -6,7 +6,19 @@
 
 namespace fh6r {
 
-enum class CabinMode : std::uint8_t { Unknown = 0, Cockpit = 1, Exterior = 2 };
+// FH6's fixed driving-camera cycle.  Keeping the concrete view in the DSP
+// avoids collapsing every non-interior camera to one generic bypass.
+enum class CabinMode : std::uint8_t {
+    Unknown = 0,
+    Cockpit,
+    Dashboard,
+    ChaseNear,
+    ChaseFar,
+    Hood,
+    Bumper
+};
+
+const char* cabin_mode_name(CabinMode mode) noexcept;
 
 // The five profiles currently enabled by FH6's IRMappings.xml plus a neutral
 // fallback. Profiles are deliberately acoustic classes rather than car names.
@@ -121,6 +133,10 @@ private:
 
     float openness_state_ = 0.0f;
     float mode_mix_state_ = 0.0f;
+    float view_gain_state_ = 1.0f;
+    float view_width_state_ = 1.0f;
+    float view_cutoff_state_ = 18000.0f;
+    float exterior_lp_[2]{};
 };
 
 const char* cabin_profile_name(CabinProfile profile) noexcept;

@@ -69,6 +69,27 @@ struct Profile {
     float reflection_scale;
 };
 
+struct ViewRender {
+    float cabin_mix;
+    float wet_scale;
+    float width;
+    float gain;
+    float cutoff_hz;
+    float active;
+};
+
+constexpr ViewRender view_render(CabinMode mode) noexcept {
+    switch (mode) {
+        case CabinMode::Cockpit:   return {1.0f, 1.00f, 1.00f, 1.02f, 18000.0f, 1.0f};
+        case CabinMode::Dashboard: return {1.0f, 0.84f, 0.92f, 1.04f, 18000.0f, 1.0f};
+        case CabinMode::ChaseNear: return {0.0f, 0.00f, 0.58f, 1.00f, 15000.0f, 1.0f};
+        case CabinMode::ChaseFar:  return {0.0f, 0.00f, 0.40f, 0.94f, 10500.0f, 1.0f};
+        case CabinMode::Hood:      return {0.0f, 0.00f, 0.74f, 1.03f, 16500.0f, 1.0f};
+        case CabinMode::Bumper:    return {0.0f, 0.00f, 0.62f, 1.00f, 13500.0f, 1.0f};
+        default:                   return {0.0f, 0.00f, 1.00f, 1.00f, 20000.0f, 0.0f};
+    }
+}
+
 constexpr std::array<Profile, static_cast<int>(CabinProfile::Count)> kProfiles{{
     {0.14f, 0.065f, 0.20f, 0.40f, 1.00f}, // Generic
     {0.17f, 0.095f, 0.30f, 0.30f, 1.10f}, // Luxury
@@ -147,6 +168,18 @@ CabinDSP::Biquad make_biquad(int type, double f0, double db, double q) noexcept 
 }
 
 } // namespace
+
+const char* cabin_mode_name(CabinMode mode) noexcept {
+    switch (mode) {
+        case CabinMode::Cockpit: return "cockpit";
+        case CabinMode::Dashboard: return "dashboard";
+        case CabinMode::ChaseNear: return "chase_near";
+        case CabinMode::ChaseFar: return "chase_far";
+        case CabinMode::Hood: return "hood";
+        case CabinMode::Bumper: return "bumper";
+        default: return "unknown";
+    }
+}
 
 const char* cabin_profile_name(CabinProfile p) noexcept {
     switch (p) {
@@ -251,7 +284,12 @@ void CabinDSP::reset() noexcept {
     for (auto& stage : bq_z2_) { stage[0] = 0.0f; stage[1] = 0.0f; }
     source_pos_ = 0;
     openness_state_ = openness_.load(std::memory_order_acquire);
-    mode_mix_state_ = mode_.load(std::memory_order_acquire) == CabinMode::Cockpit ? 1.0f : 0.0f;
+    const auto view = view_render(mode_.load(std::memory_order_acquire));
+    mode_mix_state_ = view.active;
+    view_gain_state_ = view.gain;
+    view_width_state_ = view.width;
+    view_cutoff_state_ = view.cutoff_hz;
+    exterior_lp_[0] = exterior_lp_[1] = 0.0f;
 }
 
 float CabinDSP::source_read(int channel, float delay) const noexcept {
@@ -289,6 +327,7 @@ void CabinDSP::process(float& left, float& right) noexcept {
     const float dry_r = right;
 
     const CabinMode mode = mode_.load(std::memory_order_relaxed);
+    const ViewRender view = view_render(mode);
     const int profile_index = std::clamp(static_cast<int>(profile_.load(std::memory_order_relaxed)),
                                          0, static_cast<int>(CabinProfile::Count)-1);
     const int layout_index = std::clamp(static_cast<int>(layout_.load(std::memory_order_relaxed)), 0, 3);
@@ -397,7 +436,7 @@ void CabinDSP::process(float& left, float& right) noexcept {
 
     float wet = cabin_wet_.load(std::memory_order_relaxed);
     float refl = reflection_amount_.load(std::memory_order_relaxed);
-    wet *= 1.0f - 0.68f * openness;
+    wet *= (1.0f - 0.68f * openness) * view.wet_scale;
 
     float out_l = direct_l + wet * (refl * profile.early_gain * early_l + profile.late_gain * late_l);
     float out_r = direct_r + wet * (refl * profile.early_gain * early_r + profile.late_gain * late_r);
@@ -412,13 +451,34 @@ void CabinDSP::process(float& left, float& right) noexcept {
         out_r += eq_mix * (eq_r - out_r);
     }
 
-    // View changes are audible, so crossfade the processed cabin signal over
-    // about 40 ms. Exterior and unknown states are true unity-gain bypasses.
-    const float mode_target = mode == CabinMode::Cockpit ? 1.0f : 0.0f;
-    mode_mix_state_ += 0.00052f * (mode_target - mode_mix_state_);
+    // The four exterior cameras hear a distance-dependent, progressively
+    // narrower car source instead of sharing one unity bypass.  This is kept
+    // deliberately mild because FH6 already spatializes the vehicle itself.
+    view_gain_state_ += 0.00052f * (view.gain - view_gain_state_);
+    view_width_state_ += 0.00052f * (view.width - view_width_state_);
+    view_cutoff_state_ += 0.00052f * (view.cutoff_hz - view_cutoff_state_);
+    const float mid = 0.5f * (dry_l + dry_r);
+    const float side = 0.5f * (dry_l - dry_r) * view_width_state_;
+    const float ext_in_l = mid + side;
+    const float ext_in_r = mid - side;
+    const float lp_alpha = 1.0f - std::exp(-2.0f * kPi * view_cutoff_state_ / kSampleRate);
+    exterior_lp_[0] += lp_alpha * (ext_in_l - exterior_lp_[0]);
+    exterior_lp_[1] += lp_alpha * (ext_in_r - exterior_lp_[1]);
+    const float exterior_l = exterior_lp_[0] * view_gain_state_;
+    const float exterior_r = exterior_lp_[1] * view_gain_state_;
+
+    const float cabin_mid = 0.5f * (out_l + out_r);
+    const float cabin_side = 0.5f * (out_l - out_r) * view_width_state_;
+    const float cabin_l = (cabin_mid + cabin_side) * view_gain_state_;
+    const float cabin_r = (cabin_mid - cabin_side) * view_gain_state_;
+    const float target_l = view.cabin_mix * cabin_l + (1.0f - view.cabin_mix) * exterior_l;
+    const float target_r = view.cabin_mix * cabin_r + (1.0f - view.cabin_mix) * exterior_r;
+
+    // View changes crossfade over about 40 ms. Unknown is the only true bypass.
+    mode_mix_state_ += 0.00052f * (view.active - mode_mix_state_);
     const float mix = std::clamp(mode_mix_state_, 0.0f, 1.0f);
-    const float processed_l = softclip(out_l, ceiling);
-    const float processed_r = softclip(out_r, ceiling);
+    const float processed_l = softclip(target_l, ceiling);
+    const float processed_r = softclip(target_r, ceiling);
     left = dry_l + mix * (processed_l - dry_l);
     right = dry_r + mix * (processed_r - dry_r);
 }

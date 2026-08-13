@@ -43,7 +43,8 @@ int main() {
         assert(peak > 0.0f);
     }
 
-    // 3. Exterior is a true unity-gain bypass after the short view crossfade.
+    // 3. Exterior views are rendered as a narrower car source instead of the
+    //    old shared unity bypass.
     {
         dsp.set_mode(fh6r::CabinMode::Cockpit);
         dsp.reset();
@@ -51,15 +52,15 @@ int main() {
             float l = 0.3f, r = -0.2f;
             dsp.process(l, r);
         }
-        dsp.set_mode(fh6r::CabinMode::Exterior);
+        dsp.set_mode(fh6r::CabinMode::ChaseNear);
         float l = 0.3f, r = -0.2f;
         for (int i = 0; i < 48000; ++i) {
             l = 0.3f;
             r = -0.2f;
             dsp.process(l, r);
         }
-        assert(std::fabs(l - 0.3f) < 1e-4f);
-        assert(std::fabs(r + 0.2f) < 1e-4f);
+        assert(std::fabs(l - 0.3f) > 1e-3f || std::fabs(r + 0.2f) > 1e-3f);
+        assert(std::fabs(l) <= 1.001f && std::fabs(r) <= 1.001f);
     }
 
     // 4. Unknown mode fails safe to bypass and remains finite/bounded.

@@ -291,6 +291,7 @@ struct HttpServer::Impl {
           << ",\"primed\":" << (ds.primed?"true":"false") << ",\"last_frames\":" << ds.last_frames
           << ",\"last_channels\":" << ds.last_channels << "},\"controller\":{\"target_found\":" << (cs.target_found?"true":"false")
           << ",\"streamer_mode\":" << (cs.streamer_mode?"true":"false")
+          << ",\"camera_view\":\"" << cabin_mode_name(cs.camera_view) << "\""
           << ",\"station_name\":\"" << json_escape(cs.station_name) << "\""
           << ",\"sound_name\":\"" << json_escape(cs.sound_name) << "\"}}";
         return o.str();
