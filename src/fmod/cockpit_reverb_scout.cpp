@@ -17,8 +17,10 @@
 namespace fh6r::fmod {
 namespace {
 
-// FMOD_DSP_TYPE_CONVOLUTIONREVERB == 32 (matches the FADER=7 we already saw).
-constexpr std::int32_t kTypeConvolutionReverb = 32;
+// FMOD Studio 2.x DSP type (NOT FMOD Ex): ConvolutionReverb = 28,
+// MultibandEq = 32, Send = 21, Return = 22, Pan = 24. Confirmed against the
+// live graph via getInfo (type=28 -> "FMOD Convolution Reverb").
+constexpr std::int32_t kTypeConvolutionReverb = 28;
 constexpr std::int32_t kMaxDepth = 8;
 constexpr std::int32_t kMaxGroups = 256;
 constexpr std::int32_t kMaxDSPs = 64;
