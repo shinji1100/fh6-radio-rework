@@ -181,6 +181,16 @@ const char* cabin_mode_name(CabinMode mode) noexcept {
     }
 }
 
+CabinMode cabin_mode_from_name(std::string_view name) noexcept {
+    if (name == "cockpit") return CabinMode::Cockpit;
+    if (name == "dashboard") return CabinMode::Dashboard;
+    if (name == "chase_near") return CabinMode::ChaseNear;
+    if (name == "chase_far") return CabinMode::ChaseFar;
+    if (name == "hood") return CabinMode::Hood;
+    if (name == "bumper") return CabinMode::Bumper;
+    return CabinMode::Unknown;
+}
+
 const char* cabin_profile_name(CabinProfile p) noexcept {
     switch (p) {
         case CabinProfile::Luxury: return "luxury";

@@ -196,6 +196,14 @@ label{display:block;margin:12px 0 6px;color:#abb5bf}select,input[type=range]{wid
 <section class="card"><h2>输出</h2><label>音量 <span id="gainText">100%</span></label><input id="gain" type="range" min="0" max="200" value="100">
 <label class="row"><input id="stereo" type="checkbox"> 原生双声道（实验性）</label>
 <p class="muted">默认关闭。关闭时保留 FMOD 原本的缓冲区声道结构，但向各声道写入同一个 mono 样本，避免 3D 电台通道的相位问题。</p></section>
+<section class="card"><h2>相机视角</h2>
+<p>插件当前视角：<b id="cam">—</b></p>
+<p class="muted">起始视角不固定，且计数可能与画面失同步。若插件显示与画面不符，点击下方实际视角完成同步；之后每次按相机键会按 仪表盘→引擎盖→保险杠→追尾1→追尾2→驾驶位 的顺序跟随。</p>
+<div class="row">
+<button data-sync="dashboard">仪表盘</button><button data-sync="hood">引擎盖</button>
+<button data-sync="bumper">保险杠/车头</button><button data-sync="chase_near">追尾 1</button>
+<button data-sync="chase_far">追尾 2</button><button data-sync="cockpit">驾驶位</button>
+</div><div id="camMsg" class="muted"></div></section>
 <section class="card"><h2>诊断</h2><div id="diag" class="muted">—</div></section>
 <section class="card"><h2>音频状态探测</h2>
 <div class="row"><button id="saveCockpit">存为 cockpit</button><button id="saveChase">存为 chase</button><button id="compare">对比 cockpit/chase</button></div>
@@ -214,6 +222,7 @@ label{display:block;margin:12px 0 6px;color:#abb5bf}select,input[type=range]{wid
 <div id="viewMap" class="muted">尚未采集</div></section>
 </main><script>
 const $=id=>document.getElementById(id);let state=null;
+const camLabels={dashboard:'仪表盘',cockpit:'驾驶位',chase_near:'追尾 1',chase_far:'追尾 2',hood:'引擎盖',bumper:'保险杠/车头',unknown:'未知'};
 async function api(path,opt){const r=await fetch(path,opt);if(!r.ok)throw new Error(await r.text());const t=await r.text();return t?JSON.parse(t):{};}
 async function devices(){const d=await api('/api/devices');const sel=$('device'),old=state?.config?.endpoint_id||sel.value;sel.textContent='';
  const def=document.createElement('option');def.value='';def.textContent='Windows 默认播放设备';sel.append(def);
@@ -224,6 +233,7 @@ async function refresh(){try{state=await api('/api/state');$('capture').textCont
  $('hint').textContent=!state.controller.streamer_mode?(state.controller.station_name?`当前电台：${state.controller.station_name}。请切换到 Streamer Mode。`:'尚未识别电台状态，请确认 FH6 已进入可驾驶场景并启用 Streamer Mode。'):(state.controller.target_found?(state.dsp.attached?`已自动锁定 ${state.controller.sound_name||'当前 Streamer Mode 音轨'} 并挂载 DSP。`:'已找到 active stream，等待有效 FMOD channel。'):'Streamer Mode 已识别，正在等待 active radio stream。');
  $('gain').value=Math.round(state.config.gain*100);$('gainText').textContent=Math.round(state.config.gain*100)+'%';$('stereo').checked=state.config.native_stereo;
  $('diag').textContent=`设备: ${state.capture.device_name||'—'} · 捕获包: ${state.capture.packets} · 捕获帧: ${state.capture.frames_captured} · discontinuity: ${state.capture.discontinuities} · ring overflow: ${state.ring.overflow_frames} · DSP underrun: ${state.dsp.underrun_frames} · rebuffer: ${state.dsp.rebuffer_events} · callbacks: ${state.dsp.callbacks}`;
+ $('cam').textContent=camLabels[state.controller.camera_view]||state.controller.camera_view;
  }catch(e){$('error').textContent=String(e)}}
 $('refresh').onclick=async()=>{await devices();await refresh()};$('apply').onclick=async()=>{await api('/api/device',{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:$('device').value});await refresh()};
 $('start').onclick=async()=>{await api('/api/capture/start',{method:'POST'});await refresh()};$('stop').onclick=async()=>{await api('/api/capture/stop',{method:'POST'});await refresh()};
@@ -238,6 +248,7 @@ $('mdReset').onclick=async()=>{try{await api('/api/memdiff/reset',{method:'POST'
 function showViewMap(r){const labels={dashboard:'仪表盘',cockpit:'驾驶位',chase_near:'追尾1',chase_far:'追尾2',hood:'引擎盖',bumper:'保险杠'};let s='阶段: '+r.phase+' · ';for(const [k,v] of Object.entries(r.counts||{}))s+=labels[k]+': '+v+'/2  ';if(r.phase==='complete')s+=' · 稳定候选: '+(r.candidates||[]).length;$('viewMap').textContent=s;}
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=async()=>{try{showViewMap(await api('/api/viewmap/capture',{method:'POST',headers:{'Content-Type':'text/plain'},body:b.dataset.view}))}catch(e){$('viewMap').textContent=String(e)}});
 $('viewReset').onclick=async()=>{try{showViewMap(await api('/api/viewmap/reset',{method:'POST'}))}catch(e){$('viewMap').textContent=String(e)}};
+document.querySelectorAll('[data-sync]').forEach(b=>b.onclick=async()=>{try{await api('/api/camera/sync',{method:'POST',headers:{'Content-Type':'text/plain'},body:b.dataset.sync});$('camMsg').textContent='已同步 -> '+b.textContent;await refresh()}catch(e){$('camMsg').textContent=String(e)}});
 (async()=>{await refresh();await devices();refreshProbe();setInterval(refresh,1000);setInterval(refreshProbe,1000)})();
 </script></body></html>)HTML";
 }
@@ -451,6 +462,15 @@ struct HttpServer::Impl {
         }
         if (req.method == "GET" && req.path == "/api/viewmap/result") {
             respond(client, 200, memdiff.view_map_json()); return;
+        }
+        if (req.method == "POST" && req.path == "/api/camera/sync") {
+            const CabinMode mode = cabin_mode_from_name(req.body);
+            if (mode == CabinMode::Unknown) {
+                respond(client,400,"{\"error\":\"unknown view\"}"); return;
+            }
+            controller.sync_camera_view(mode);
+            std::ostringstream o; o << "{\"camera_view\":\"" << cabin_mode_name(mode) << "\"}";
+            respond(client,200,o.str()); return;
         }
         if (req.method == "POST" && req.path == "/api/capture/start") {
             if (!capture.start()) { respond(client,400,"{\"error\":\"capture start failed\"}"); return; }

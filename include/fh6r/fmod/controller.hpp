@@ -25,6 +25,9 @@ public:
     Controller(const Controller&) = delete;
     Controller& operator=(const Controller&) = delete;
     ControllerStats stats() const;
+    // Manual resync: the starting camera is not guaranteed to be Dashboard, so
+    // the dashboard UI / API can tell the counter which view is actually shown.
+    void sync_camera_view(CabinMode mode) noexcept;
 private:
     void run(std::stop_token stop) noexcept;
     bool discover_target() noexcept;

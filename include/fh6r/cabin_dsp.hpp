@@ -19,6 +19,7 @@ enum class CabinMode : std::uint8_t {
 };
 
 const char* cabin_mode_name(CabinMode mode) noexcept;
+CabinMode cabin_mode_from_name(std::string_view name) noexcept;
 
 // The five profiles currently enabled by FH6's IRMappings.xml plus a neutral
 // fallback. Profiles are deliberately acoustic classes rather than car names.

@@ -81,14 +81,14 @@ bool camera_button_down() noexcept {
 }
 
 CabinMode next_camera_view(CabinMode current) noexcept {
-    // Forza driving-camera order: Driver/Dashboard -> Chase Near -> Chase Far
-    // -> Bumper -> Hood -> Cockpit -> Driver/Dashboard.
+    // User-confirmed FH6 driving-camera cycle (2026-08-14):
+    // Dashboard -> Hood -> Bumper -> Chase Near -> Chase Far -> Cockpit -> Dashboard.
     switch (current) {
-        case CabinMode::Dashboard: return CabinMode::ChaseNear;
+        case CabinMode::Dashboard: return CabinMode::Hood;
+        case CabinMode::Hood: return CabinMode::Bumper;
+        case CabinMode::Bumper: return CabinMode::ChaseNear;
         case CabinMode::ChaseNear: return CabinMode::ChaseFar;
-        case CabinMode::ChaseFar: return CabinMode::Bumper;
-        case CabinMode::Bumper: return CabinMode::Hood;
-        case CabinMode::Hood: return CabinMode::Cockpit;
+        case CabinMode::ChaseFar: return CabinMode::Cockpit;
         case CabinMode::Cockpit: return CabinMode::Dashboard;
         default: return CabinMode::Dashboard;
     }
@@ -232,6 +232,13 @@ void Controller::reset_camera_view() noexcept {
     camera_view_.store(CabinMode::Dashboard, std::memory_order_release);
     bridge_.set_cabin_mode(CabinMode::Dashboard);
     log::info("[camera] reset -> dashboard");
+}
+
+void Controller::sync_camera_view(CabinMode mode) noexcept {
+    if (mode == CabinMode::Unknown) return;
+    camera_view_.store(mode, std::memory_order_release);
+    bridge_.set_cabin_mode(mode);
+    log::info("[camera] manual sync -> {}", cabin_mode_name(mode));
 }
 
 bool Controller::discover_target() noexcept {
