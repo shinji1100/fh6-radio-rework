@@ -42,6 +42,7 @@ add_library(version SHARED
   src/fmod/sig_scanner.cpp
   src/fmod/sig_scout.cpp
   src/fmod/studio_probe.cpp
+  src/fmod/studio_param_hook.cpp
   src/fmod/radio_discovery.cpp
   src/fmod/dsp_bridge.cpp
   src/fmod/controller.cpp

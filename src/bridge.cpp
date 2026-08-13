@@ -5,6 +5,7 @@
 #include "fh6r/fmod/dsp_bridge.hpp"
 #include "fh6r/fmod/pe_image.hpp"
 #include "fh6r/fmod/sig_scout.hpp"
+#include "fh6r/fmod/studio_param_hook.hpp"
 #include "fh6r/fmod/studio_probe.hpp"
 #include "fh6r/http/http_server.hpp"
 #include "fh6r/log.hpp"
@@ -62,6 +63,11 @@ void run_bridge(HMODULE self) noexcept {
         // parameter getters, so the next iteration can enumerate global
         // parameters and find the interior/exterior signal. Read-only.
         if (image.valid()) fmod::studio_scout(image);
+
+        // Phase 1 (interior/exterior state): observe the FMOD Studio parameter
+        // setters (read-only detour) to confirm the "Cockpit" global parameter
+        // flips on cockpit<->chase. Fail-safe; original functions always run.
+        if (image.valid()) fmod::install_studio_param_hooks(image);
 
         fmod::DSPBridge dsp{ring, fns};
         dsp.set_gain(cfg.gain);
