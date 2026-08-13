@@ -12,8 +12,106 @@ namespace fh6r::fmod {
 namespace {
 
 const char* reg_name(int r) {
-    static const char* names[] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"};
-    return (r >= 0 && r < 8) ? names[r] : "?";
+    static const char* names[] = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi",
+                                  "r8","r9","r10","r11","r12","r13","r14","r15"};
+    return (r >= 0 && r < 16) ? names[r] : "?";
+}
+
+constexpr int R_RCX = 1;
+constexpr int R_RSP = 4;
+constexpr int R_RBP = 5;
+
+// A decoded mov/lea instruction (the only shapes we care about for tracing).
+struct Insn {
+    int op = 0;          // 0x8B = mov load, 0x89 = mov store, 0x8D = lea
+    int dst_reg = -1;    // register written (mov load / lea / reg-reg store)
+    bool src_is_mem = false;
+    bool rip_rel = false;
+    int base = -1;       // memory base register
+    int disp = 0;
+    int src_reg = -1;    // register source (reg-reg move)
+    int len = 0;
+};
+
+// Decode a mov/lea instruction at q (with REX.W/R/X/B). Returns length or 0 if
+// not a recognized shape.
+int decode(const std::byte* q, const std::byte* end, Insn& out) {
+    if (end - q < 2) return 0;
+    int i = 0;
+    int rex = 0;
+    if ((std::to_integer<std::uint8_t>(q[0]) & 0xF0) == 0x40) { rex = std::to_integer<std::uint8_t>(q[0]); i = 1; }
+    const int op = std::to_integer<std::uint8_t>(q[i]);
+    if (op != 0x8B && op != 0x89 && op != 0x8D) return 0;
+    if (end - q < i + 2) return 0;
+    const int modrm = std::to_integer<std::uint8_t>(q[i + 1]);
+    const int mod = modrm >> 6;
+    const int reg = (modrm >> 3) & 7;
+    const int rm = modrm & 7;
+    const bool rex_w = rex & 8, rex_r = rex & 4, rex_x = rex & 2, rex_b = rex & 1;
+    const int r = reg | (rex_r ? 8 : 0);
+    const int m = rm | (rex_b ? 8 : 0);
+    int len = i + 2;
+
+    out = Insn{};
+    out.op = op;
+
+    if (mod == 3) {  // register operand
+        out.dst_reg = (op == 0x89) ? m : r;
+        out.src_reg = (op == 0x89) ? r : m;
+        out.len = len;
+        return len;
+    }
+
+    // memory operand
+    int base = -1;
+    int disp = 0;
+    bool rip_rel = false;
+    if (mod == 0 && rm == 5) {  // [rip+disp32]
+        if (end - q < len + 4) return 0;
+        disp = std::to_integer<std::int32_t>(*reinterpret_cast<const std::int32_t*>(q + len));
+        len += 4;
+        rip_rel = true;
+    } else if (rm == 4) {  // SIB
+        if (end - q < len + 1) return 0;
+        const int sib = std::to_integer<std::uint8_t>(q[len]); len += 1;
+        const int s_base = sib & 7;
+        const int s_index = (sib >> 3) & 7;
+        if (s_index != 4) return 0;  // indexed addressing not supported (rare here)
+        base = s_base | (rex_b ? 8 : 0);
+        if (mod == 0 && s_base == 5) {  // disp32 only
+            if (end - q < len + 4) return 0;
+            disp = std::to_integer<std::int32_t>(*reinterpret_cast<const std::int32_t*>(q + len));
+            len += 4;
+            base = -1;
+            rip_rel = true;
+        } else if (mod == 1) {
+            if (end - q < len + 1) return 0;
+            disp = static_cast<std::int8_t>(std::to_integer<std::uint8_t>(q[len])); len += 1;
+        } else if (mod == 2) {
+            if (end - q < len + 4) return 0;
+            disp = std::to_integer<std::int32_t>(*reinterpret_cast<const std::int32_t*>(q + len));
+            len += 4;
+        }
+    } else {
+        base = m;
+        if (mod == 1) {
+            if (end - q < len + 1) return 0;
+            disp = static_cast<std::int8_t>(std::to_integer<std::uint8_t>(q[len])); len += 1;
+        } else if (mod == 2) {
+            if (end - q < len + 4) return 0;
+            disp = std::to_integer<std::int32_t>(*reinterpret_cast<const std::int32_t*>(q + len));
+            len += 4;
+        }
+    }
+
+    out.src_is_mem = true;
+    out.rip_rel = rip_rel;
+    out.base = base;
+    out.disp = disp;
+    out.dst_reg = (op == 0x89) ? -1 : r;   // mov store has no register dst
+    out.src_reg = (op == 0x89) ? r : -1;   // mov store source is the reg field
+    out.len = len;
+    return len;
 }
 
 void dump_hex(std::byte* p, int n, const char* tag) {
@@ -24,76 +122,55 @@ void dump_hex(std::byte* p, int n, const char* tag) {
     log::info("[studio-system]   {}: {}", tag, hex);
 }
 
-// Identify the RCX source at a call site with a few fixed byte patterns only.
-// Recognizes the three legitimate shapes:
-//   A. lea rcx,[rip+disp]  -> global slot (out-param = &gStudioSystem)
-//   B. lea/mov rcx,[reg+disp] -> object field slot
-//   C. lea rcx,[rsp/rbp+disp] -> stack temp (value is copied out after the call)
-// Returns true when a writer was recognized, false otherwise.
-bool trace_rcx(std::byte* call_site) {
-    for (int back = 1; back <= 48; ++back) {
-        const std::byte* q = call_site - back;
-        const unsigned char* b = reinterpret_cast<const unsigned char*>(q);
+// Trace the RCX source at a call site. Walk backward up to 4 layers of
+// register data-flow to find the stable storage (global slot / object field /
+// stack temp). Read-only.
+void trace_rcx(std::byte* call_site) {
+    int reg = R_RCX;
+    std::byte* pos = call_site;
+    bool reported = false;
 
-        // lea rcx, [rip+disp32] : 48 8D 0D xx xx xx xx  (A: global slot)
-        if (back + 7 <= 48 && b[0] == 0x48 && b[1] == 0x8D && b[2] == 0x0D) {
-            std::int32_t disp = 0; std::memcpy(&disp, q + 3, 4);
-            std::byte* target = call_site - back + 7 + disp;
-            log::info("[studio-system]   RCX = &[rip+{:d}] -> abs 0x{:X}  [A: global slot]",
-                      disp, reinterpret_cast<std::uintptr_t>(target));
-            return true;
+    for (int layer = 0; layer < 4; ++layer) {
+        bool found = false;
+        for (int back = 1; back <= 48 && !found; ++back) {
+            const std::byte* q = pos - back;
+            if (q < call_site - 48) break;
+            Insn insn;
+            const int len = decode(q, pos, insn);
+            if (len == 0) continue;
+            if (insn.dst_reg != reg) continue;
+
+            found = true;
+            if (insn.rip_rel) {
+                std::byte* target = const_cast<std::byte*>(q) + insn.len + insn.disp;
+                log::info("[studio-system]   RCX-source: {} = &[rip+{:d}] -> abs 0x{:X}  [global slot]",
+                          reg_name(reg), insn.disp, reinterpret_cast<std::uintptr_t>(target));
+                reported = true;
+            } else if (insn.src_is_mem && insn.base >= 0) {
+                log::info("[studio-system]   RCX-source: {} = [{}+0x{:X}]  [object field]",
+                          reg_name(reg), reg_name(insn.base), insn.disp);
+                if (insn.base == R_RSP || insn.base == R_RBP) {
+                    log::info("[studio-system]   (base is stack; value copied out after call)");
+                    dump_hex(call_site + 5, 16, "post-call");
+                    reported = true;
+                } else {
+                    reg = insn.base;   // keep tracing the base register
+                    pos = q;
+                }
+            } else if (insn.src_reg >= 0) {
+                log::info("[studio-system]   RCX-source: {} = {}", reg_name(reg), reg_name(insn.src_reg));
+                reg = insn.src_reg;
+                pos = q;
+            } else {
+                log::info("[studio-system]   RCX-source: {} (unrecognized writer)", reg_name(reg));
+                reported = true;
+            }
         }
-        // mov rcx, [rip+disp32] : 48 8B 0D xx xx xx xx
-        if (back + 7 <= 48 && b[0] == 0x48 && b[1] == 0x8B && b[2] == 0x0D) {
-            std::int32_t disp = 0; std::memcpy(&disp, q + 3, 4);
-            std::byte* target = call_site - back + 7 + disp;
-            log::info("[studio-system]   RCX = [rip+{:d}] -> abs 0x{:X}  [global value]",
-                      disp, reinterpret_cast<std::uintptr_t>(target));
-            return true;
-        }
-        // lea rcx, [rsp+disp8] : 48 8D 4C 24 xx  (C: stack temp)
-        if (back + 5 <= 48 && b[0] == 0x48 && b[1] == 0x8D && b[2] == 0x4C && b[3] == 0x24) {
-            const int disp8 = static_cast<std::int8_t>(b[4]);
-            log::info("[studio-system]   RCX = &[rsp+{:d}]  [C: stack temp]", disp8);
-            dump_hex(call_site + 5, 16, "post-call");
-            return true;
-        }
-        // lea rcx, [rbp+disp8] : 48 8D 4D xx  (C: stack temp, frame-relative)
-        if (back + 4 <= 48 && b[0] == 0x48 && b[1] == 0x8D && b[2] == 0x4D) {
-            const int disp8 = static_cast<std::int8_t>(b[3]);
-            log::info("[studio-system]   RCX = &[rbp+{:d}]  [C: stack temp]", disp8);
-            dump_hex(call_site + 5, 16, "post-call");
-            return true;
-        }
-        // lea rcx, [rsp+disp32] : 48 8D 8C 24 xx xx xx xx
-        if (back + 8 <= 48 && b[0] == 0x48 && b[1] == 0x8D && b[2] == 0x8C && b[3] == 0x24) {
-            std::int32_t disp = 0; std::memcpy(&disp, q + 4, 4);
-            log::info("[studio-system]   RCX = &[rsp+0x{:X}]  [C: stack temp]", disp);
-            dump_hex(call_site + 5, 16, "post-call");
-            return true;
-        }
-        // mov rcx, [reg+disp8] : 48 8B 4? xx  (B: object field)
-        if (back + 4 <= 48 && b[0] == 0x48 && b[1] == 0x8B && (b[2] & 0xC0) == 0x40) {
-            const int rm = b[2] & 7;
-            const int disp8 = static_cast<std::int8_t>(b[3]);
-            log::info("[studio-system]   RCX = [{}+{:d}]  [B: object field]", reg_name(rm), disp8);
-            return true;
-        }
-        // mov rcx, [reg+disp32] : 48 8B 8? xx xx xx xx
-        if (back + 7 <= 48 && b[0] == 0x48 && b[1] == 0x8B && (b[2] & 0xC0) == 0x80) {
-            const int rm = b[2] & 7;
-            std::int32_t disp = 0; std::memcpy(&disp, q + 3, 4);
-            log::info("[studio-system]   RCX = [{}+0x{:X}]  [B: object field]", reg_name(rm), disp);
-            return true;
-        }
-        // mov rcx, reg : 48 8B C?
-        if (back + 3 <= 48 && b[0] == 0x48 && b[1] == 0x8B && (b[2] & 0xC0) == 0xC0) {
-            const int rm = b[2] & 7;
-            log::info("[studio-system]   RCX = {}  [register forward]", reg_name(rm));
-            return true;
-        }
+        if (!found || reported) break;
     }
-    return false;
+    if (!reported) {
+        log::info("[studio-system]   (trace stopped: no writer found or depth limit)");
+    }
 }
 
 } // namespace
@@ -122,7 +199,7 @@ void scout_studio_system(const PEImage& img) noexcept {
                       a, reinterpret_cast<std::uintptr_t>(fn),
                       static_cast<std::uintptr_t>(p - img.base));
             dump_hex(p - 48, 48, "ctx");
-            if (!trace_rcx(p)) log::info("[studio-system]   (no recognized RCX writer)");
+            trace_rcx(p);
         }
 
         // Pass 2: FF 15 [rip+disp32] RIP-indirect calls (via function pointer).
@@ -138,7 +215,7 @@ void scout_studio_system(const PEImage& img) noexcept {
                       static_cast<std::uintptr_t>(p - img.base),
                       reinterpret_cast<std::uintptr_t>(slot));
             dump_hex(p - 48, 48, "ctx");
-            if (!trace_rcx(p)) log::info("[studio-system]   (no recognized RCX writer)");
+            trace_rcx(p);
         }
 
         log::info("[studio-system] {} = 0x{:X} -> {} xref(s)", a,
