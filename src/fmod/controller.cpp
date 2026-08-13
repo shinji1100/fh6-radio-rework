@@ -1,6 +1,7 @@
 #include "fh6r/fmod/controller.hpp"
 #include "fh6r/fmod/event_instance_probe.hpp"
 #include "fh6r/fmod/radio_discovery.hpp"
+#include "fh6r/fmod/radio_acoustics_probe.hpp"
 #include "fh6r/fmod/sig_scanner.hpp"
 #include "fh6r/fmod/studio_system_scout.hpp"
 #include "fh6r/log.hpp"
@@ -183,6 +184,11 @@ bool Controller::discover_target() noexcept {
     if (!event_probed_) {
         event_probed_ = true;
         probe_event_instance(image_, active->radio_stream);
+    }
+
+    if (!radio_acoustics_probed_) {
+        radio_acoustics_probed_ = true;
+        probe_radio_acoustics(image_, *active, bridge_.fns());
     }
 
     if (!studio_identity_checked_) {

@@ -84,6 +84,10 @@ bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
         resolve_by_anchor_unique(img, "DSP::getParameterData"));
     out.dsp_get_parameter_info = reinterpret_cast<FMODFns::DSPGetParameterInfo>(
         resolve_by_anchor_unique(img, "DSP::getParameterInfo"));
+    out.channel_get_current_sound = reinterpret_cast<FMODFns::ChannelGetCurrentSound>(
+        resolve_by_anchor_unique(img, "Channel::getCurrentSound"));
+    out.sound_get_mode = reinterpret_cast<FMODFns::SoundGetMode>(
+        resolve_by_anchor_unique(img, "Sound::getMode"));
     log::info("[fmod] create=0x{:X} release=0x{:X} add=0x{:X} remove=0x{:X} resolver=0x{:X} unlock=0x{:X}",
               reinterpret_cast<std::uintptr_t>(out.system_create_dsp),
               reinterpret_cast<std::uintptr_t>(out.dsp_release),
@@ -98,6 +102,9 @@ bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
               reinterpret_cast<std::uintptr_t>(out.dsp_get_type),
               reinterpret_cast<std::uintptr_t>(out.dsp_get_num_parameters),
               reinterpret_cast<std::uintptr_t>(out.dsp_get_parameter_float));
+    log::info("[fmod] radio identity getCurrentSound=0x{:X} getMode=0x{:X}",
+              reinterpret_cast<std::uintptr_t>(out.channel_get_current_sound),
+              reinterpret_cast<std::uintptr_t>(out.sound_get_mode));
     return out.ready();
 }
 

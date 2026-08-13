@@ -56,6 +56,7 @@ add_library(version SHARED
   src/fmod/event_instance_probe.cpp
   src/fmod/metadata_injector.cpp
   src/fmod/radio_discovery.cpp
+  src/fmod/radio_acoustics_probe.cpp
   src/fmod/dsp_bridge.cpp
   src/fmod/controller.cpp
 )

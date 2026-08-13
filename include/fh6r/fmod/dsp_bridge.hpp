@@ -40,6 +40,10 @@ struct FMODFns {
     // DSP::getParameterInfo -> FMOD_DSP_PARAMETER_DESC** (triple-verify the
     // parameter layout: DATA/FLOAT/BOOL type per index).
     using DSPGetParameterInfo = std::uint32_t (*)(void*, std::int32_t, DspParamDesc**);
+    // Radio acoustics identity probe. FH6's statically linked Core API uses
+    // packed channel/sound handles for these two read-only getters.
+    using ChannelGetCurrentSound = std::uint32_t (*)(std::uint64_t, std::uint64_t*);
+    using SoundGetMode = std::uint32_t (*)(std::uint64_t, std::uint32_t*);
     SystemCreateDSP system_create_dsp = nullptr;
     DSPRelease dsp_release = nullptr;
     AddDSP add_dsp = nullptr;
@@ -62,6 +66,8 @@ struct FMODFns {
     GroupGetChannel group_get_channel = nullptr;
     DSPGetParameterData dsp_get_parameter_data = nullptr;
     DSPGetParameterInfo dsp_get_parameter_info = nullptr;
+    ChannelGetCurrentSound channel_get_current_sound = nullptr;
+    SoundGetMode sound_get_mode = nullptr;
     std::byte* host_base = nullptr;
     bool ready() const noexcept { return host_base && dsp_release && add_dsp && remove_dsp && resolver && unlock; }
     // Probe APIs are optional to audio injection; present iff each anchor resolved uniquely.
