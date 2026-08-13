@@ -37,6 +37,7 @@ private:
     mutable std::mutex mu_;
     bool target_found_ = false;
     bool streamer_mode_ = false;
+    bool event_probed_ = false;
     std::string station_name_;
     std::string sound_name_;
     void** radio_state_slot_ = nullptr;

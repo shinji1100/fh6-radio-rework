@@ -1,4 +1,5 @@
 #include "fh6r/fmod/controller.hpp"
+#include "fh6r/fmod/event_instance_probe.hpp"
 #include "fh6r/fmod/radio_discovery.hpp"
 #include "fh6r/fmod/sig_scanner.hpp"
 #include "fh6r/log.hpp"
@@ -174,6 +175,15 @@ bool Controller::discover_target() noexcept {
         std::scoped_lock lk{mu_};
         changed = sound_name_ != active->sound_name || !target_found_;
     }
+    // One-shot: verify whether radio_stream is a Studio EventInstance. This is
+    // the prerequisite for tracing the radio's downstream routing via
+    // EventInstance::getChannelGroup (the Core getChannel enumeration does not
+    // expose this channel). Read-only; runs once on first successful attach.
+    if (!event_probed_) {
+        event_probed_ = true;
+        probe_event_instance(image_, active->radio_stream);
+    }
+
     bridge_.set_target(*active, active_system);
     bridge_.retarget_if_needed();
     metadata_.set_target(active->sample_props_body);
