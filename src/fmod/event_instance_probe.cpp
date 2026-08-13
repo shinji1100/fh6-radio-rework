@@ -14,10 +14,10 @@ struct Method {
     const char* label;
 };
 
-// A small set of EventInstance methods resolved only to *identify* the object.
-// getChannelGroup is the eventual target; the rest are cheap read-only
-// accessors used as cross-signals so a single coincidental address match does
-// not mislead us.
+// EventInstance C API names resolved only to observe the wrapper's vtable.
+// These are observation markers, NOT identity proof: FMOD Studio API types are
+// packed handles, not vtable-polymorphic objects, so a vtable here is more
+// consistent with an FH6 wrapper than with an EventInstance itself.
 constexpr Method kMethods[] = {
     {"EventInstance::getChannelGroup",  "getChannelGroup"},
     {"EventInstance::getDescription",   "getDescription"},
@@ -76,10 +76,12 @@ bool probe_event_instance(const PEImage& img, std::byte* radio_stream) noexcept 
             log::info("[event]   [{:2}] 0x{:X}", i, reinterpret_cast<std::uintptr_t>(entry));
     }
 
-    const bool likely = matches >= 2;
-    log::info("[event] vtable matches={} -> radio_stream {}", matches,
-              likely ? "LIKELY an EventInstance" : "NOT confirmed as EventInstance");
-    return likely;
+    // Observation only. Do NOT interpret matches>=2 as "is an EventInstance":
+    // FMOD Studio types are packed handles, so this vtable is expected to belong
+    // to an FH6 wrapper, not the EventInstance itself. The dump is a data point
+    // for locating the wrapper field that holds the real EventInstance handle.
+    log::info("[event] vtable match count={} (observation only; identity NOT asserted)", matches);
+    return true;
 }
 
 } // namespace fh6r::fmod
