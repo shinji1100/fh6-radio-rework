@@ -1,5 +1,6 @@
 #include "fh6r/fmod/cockpit_reverb_scout.hpp"
 #include "fh6r/fmod/dsp_bridge.hpp"
+#include "fh6r/fmod/fmod_dsp_type.hpp"
 #include "fh6r/log.hpp"
 #include "fh6r/safe_mem.hpp"
 
@@ -17,70 +18,142 @@
 namespace fh6r::fmod {
 namespace {
 
-// FMOD Studio 2.x DSP type (NOT FMOD Ex): ConvolutionReverb = 28,
-// MultibandEq = 32, Send = 21, Return = 22, Pan = 24. Confirmed against the
-// live graph via getInfo (type=28 -> "FMOD Convolution Reverb").
-constexpr std::int32_t kTypeConvolutionReverb = 28;
+// Limits (scout safety guards, unrelated to FMOD type values).
 constexpr std::int32_t kMaxDepth = 8;
 constexpr std::int32_t kMaxGroups = 256;
 constexpr std::int32_t kMaxDSPs = 64;
 constexpr std::int32_t kMaxChannels = 256;
 constexpr int kMaxFound = 8;
 
-// FMOD convolution reverb parameter indices (public FMOD docs):
-//   0 = IR data, 1 = Wet, 2 = Dry, 3 = Linked
-constexpr std::int32_t kParamIR = 0;
-constexpr std::int32_t kParamWet = 1;
-constexpr std::int32_t kParamDry = 2;
-constexpr std::int32_t kParamLinked = 3;
-
 int g_found = 0;
+
+// FNV-1a 64-bit hash over a byte range. Used to fingerprint IR data so a car
+// switch can be observed as "IR changed" (different hash) without trusting any
+// numeric type or guessing the 18-sample -> category mapping.
+std::uint64_t fnv1a(const std::byte* p, std::uint32_t len) noexcept {
+    std::uint64_t h = 0xcbf29ce484222325ull;
+    for (std::uint32_t i = 0; i < len; ++i)
+        h = (h ^ static_cast<std::uint8_t>(p[i])) * 0x100000001b3ull;
+    return h;
+}
+
+// Copy a fixed-size (possibly non-null-terminated) name into a null-terminated
+// buffer. FMOD name fields (DSP name / parameter name) are fixed char arrays
+// that are not guaranteed null-terminated.
+void copy_name(char* dst, std::size_t cap, const char* src, std::size_t n) noexcept {
+    const std::size_t k = n < cap ? n : cap - 1;
+    std::memcpy(dst, src, k);
+    dst[k] = '\0';
+}
+
+// Triple verification result for a candidate convolution-reverb DSP. Uses
+// name (primary) + numeric type (cross-check); parameter layout is verified
+// separately inside dump_convolution.
+bool is_convolution(const FMODFns& fns, void* dsp) noexcept {
+    char name[32]{};
+    std::uint32_t version = 0;
+    std::int32_t channels = -1, cw = -1, chh = -1;
+    if (fns.dsp_get_info)
+        seh_call([&] { fns.dsp_get_info(dsp, name, &version, &channels, &cw, &chh); });
+    name[31] = '\0';
+
+    std::int32_t t = -1;
+    if (fns.dsp_get_type) seh_call([&] { fns.dsp_get_type(dsp, &t); });
+
+    const bool name_ok = std::strcmp(name, kDspNameConvolutionReverb) == 0;
+    const bool type_ok = t == static_cast<std::int32_t>(DspType::ConvolutionReverb);
+    return name_ok || type_ok; // either signal alone flags it; both together confirm
+}
 
 void dump_convolution(const FMODFns& fns, void* dsp, const std::string& out_dir) noexcept {
     const int seq = g_found++;
 
-    float wet = 0, dry = 0;
-    std::int32_t linked = -1;
-    char vs[64]{};
-    if (fns.dsp_get_parameter_float) {
-        seh_call([&] { fns.dsp_get_parameter_float(dsp, kParamWet, &wet, vs, sizeof(vs)); });
-        seh_call([&] { fns.dsp_get_parameter_float(dsp, kParamDry, &dry, vs, sizeof(vs)); });
-    }
-    // LINKED is a bool (FMOD_BOOL = int); getParameterBool was dead-code-eliminated
-    // in this build, so read it via getParameterInt.
-    if (fns.dsp_get_parameter_int) {
-        seh_call([&] { fns.dsp_get_parameter_int(dsp, kParamLinked, &linked, vs, sizeof(vs)); });
-    }
+    // --- Triple verification: name + type + parameter layout. ---
+    char name[32]{};
+    std::int32_t t = -1;
+    std::uint32_t version = 0;
+    std::int32_t channels = -1, cw = -1, chh = -1;
+    if (fns.dsp_get_info)
+        seh_call([&] { fns.dsp_get_info(dsp, name, &version, &channels, &cw, &chh); });
+    name[31] = '\0';
+    if (fns.dsp_get_type) seh_call([&] { fns.dsp_get_type(dsp, &t); });
 
-    void* data = nullptr;
-    std::uint32_t length = 0;
-    char valuestr[64]{};
-    bool read_ok = false;
-    if (fns.dsp_get_parameter_data) {
-        read_ok = seh_call([&] {
-            fns.dsp_get_parameter_data(dsp, kParamIR, &data, &length, valuestr, sizeof(valuestr));
-        });
-    }
-
-    log::info("[cockpit-reverb] DSP #{} wet={:.3f} dry={:.3f} linked={} ir_read={} ir_len={}B",
-              seq, wet, dry, linked, read_ok ? "ok" : "fail", length);
-
-    if (!read_ok || !data || length <= 2) {
-        log::warn("[cockpit-reverb] DSP #{} IR unreadable (len={})", seq, length);
+    const bool name_ok = std::strcmp(name, kDspNameConvolutionReverb) == 0;
+    const bool type_ok = t == static_cast<std::int32_t>(DspType::ConvolutionReverb);
+    log::info("[cockpit-reverb] DSP #{} triple-check: name='{}' name_ok={} type={} type_ok={} ch={}",
+              seq, name, name_ok, t, type_ok, channels);
+    if (!name_ok && !type_ok) {
+        log::warn("[cockpit-reverb] DSP #{} fails name+type check; NOT interpreting parameters", seq);
         return;
     }
 
-    // First int16 = channel count, then deinterleaved int16 PCM.
-    std::int16_t channels = 0;
-    std::memcpy(&channels, data, 2);
+    // Parameter layout via getParameterInfo (third leg). Reported raw; the
+    // DATA/FLOAT/BOOL interpretation is cross-checked against FMOD 2.03 docs,
+    // not asserted from memory.
+    if (fns.dsp_get_parameter_info) {
+        for (std::int32_t i = 0; i < 4; ++i) {
+            DspParamDesc* desc = nullptr;
+            std::uint32_t rc = ~0u;
+            const bool ok = seh_call([&] { rc = fns.dsp_get_parameter_info(dsp, i, &desc); });
+            if (ok && rc == kFmodOk && desc) {
+                char pname[17]{};
+                copy_name(pname, sizeof(pname), desc->name, sizeof(desc->name));
+                log::info("[cockpit-reverb]   param[{}] type={} name='{}'", i, desc->type, pname);
+            } else {
+                log::info("[cockpit-reverb]   param[{}] getParameterInfo rc={} desc={}",
+                          i, rc, desc ? "ok" : "null");
+            }
+        }
+    } else {
+        log::info("[cockpit-reverb]   getParameterInfo unresolved (layout check skipped)");
+    }
+
+    // --- WET / DRY: float dB, accept only FMOD_OK + range [-80, +10]. ---
+    float wet = 0.0f, dry = 0.0f;
+    std::uint32_t rc_wet = ~0u, rc_dry = ~0u;
+    if (fns.dsp_get_parameter_float) {
+        seh_call([&] { rc_wet = fns.dsp_get_parameter_float(dsp, kParamWet, &wet, nullptr, 0); });
+        seh_call([&] { rc_dry = fns.dsp_get_parameter_float(dsp, kParamDry, &dry, nullptr, 0); });
+    }
+    const bool wet_ok = rc_wet == kFmodOk && wet >= -80.0f && wet <= 10.0f;
+    const bool dry_ok = rc_dry == kFmodOk && dry >= -80.0f && dry <= 10.0f;
+    log::info("[cockpit-reverb]   wet={:.3f} (rc={} ok={}) dry={:.3f} (rc={} ok={})",
+              wet, rc_wet, wet_ok, dry, rc_dry, dry_ok);
+
+    // --- LINKED: BOOL. getParameterBool is dead-code-eliminated in this build;
+    // reading via getParameterInt is a probe whose BOOL correctness is NOT yet
+    // runtime-confirmed, so the value is explicitly UNVERIFIED. ---
+    std::int32_t linked = -1;
+    std::uint32_t rc_linked = ~0u;
+    if (fns.dsp_get_parameter_int)
+        seh_call([&] { rc_linked = fns.dsp_get_parameter_int(dsp, kParamLinked, &linked, nullptr, 0); });
+    log::info("[cockpit-reverb]   linked={} (rc={}) [UNVERIFIED: bool getter not confirmed]",
+              linked, rc_linked);
+
+    // --- IR data: record FMOD_RESULT, length, channel count and FNV-1a hash.
+    // The hash is what lets a car switch be proven as "IR changed" on the next
+    // run (different car -> different hash; back -> original hash). ---
+    void* data = nullptr;
+    std::uint32_t length = 0;
+    std::uint32_t rc_ir = ~0u;
+    if (fns.dsp_get_parameter_data) {
+        seh_call([&] { rc_ir = fns.dsp_get_parameter_data(dsp, kParamIR, &data, &length, nullptr, 0); });
+    }
+    if (rc_ir != kFmodOk || !data || length <= 2) {
+        log::warn("[cockpit-reverb]   IR unreadable rc={} len={}", rc_ir, length);
+        return;
+    }
+
+    std::int16_t ir_channels = 0;
+    std::memcpy(&ir_channels, data, 2);
+    const std::uint64_t hash = fnv1a(static_cast<const std::byte*>(data), length);
     const std::uint32_t pcm_bytes = length - 2;
-    const std::uint32_t frames = (channels > 0) ? pcm_bytes / (2u * static_cast<std::uint32_t>(channels)) : 0;
-    const double duration_ms = static_cast<double>(frames) / 48.0; // 48 kHz
+    const std::uint32_t frames = (ir_channels > 0) ? pcm_bytes / (2u * static_cast<std::uint32_t>(ir_channels)) : 0;
+    const double duration_ms = static_cast<double>(frames) / 48.0;
+    log::info("[cockpit-reverb]   IR rc={} len={}B channels={} frames={} duration={:.2f}ms fnv1a={:016X}",
+              rc_ir, length, ir_channels, frames, duration_ms, hash);
 
-    log::info("[cockpit-reverb]   channels={} frames={} duration={:.2f} ms",
-              channels, frames, duration_ms);
-
-    // Persist the raw IR for offline acoustic analysis (FFT, RT60, L/R diff).
+    // Persist the raw IR for offline analysis (FFT, RT60, L/R diff).
     std::error_code ec;
     std::filesystem::path p = std::filesystem::path(out_dir) /
         ("cockpit_ir_" + std::to_string(seq) + ".raw");
@@ -103,8 +176,8 @@ void dump_convolution(const FMODFns& fns, void* dsp, const std::string& out_dir)
     const std::uint32_t nframes = std::min<std::uint32_t>(frames, b3);
     for (std::uint32_t i = 0; i < nframes; ++i) {
         double acc = 0;
-        for (std::int32_t c = 0; c < channels; ++c) {
-            const double s = static_cast<double>(pcm[i * channels + c]) / 32768.0;
+        for (std::int32_t c = 0; c < ir_channels; ++c) {
+            const double s = static_cast<double>(pcm[i * ir_channels + c]) / 32768.0;
             acc += s * s;
             if (std::fabs(s) > peak) { peak = std::fabs(s); peak_idx = i; }
         }
@@ -142,8 +215,7 @@ void dump_node(const FMODFns& fns, void* dsp, int index, int depth) noexcept {
 
     std::string flags;
     if (ninputs > 1) flags += " [MULTI-IN]";
-    if (t == kTypeConvolutionReverb) flags += " [CONV]";
-    if (t == 7) flags += " [FADER]";
+    if (t == static_cast<std::int32_t>(DspType::ConvolutionReverb)) flags += " [CONV]";
     // Case-insensitive keyword highlight for the 2D/3D Music routing question.
     std::string low;
     low.reserve(32);
@@ -180,8 +252,9 @@ void walk_group(const FMODFns& fns, void* group, int depth,
         });
         if (ok && n > 0) {
             if (n > kMaxDSPs) n = kMaxDSPs;
-            // Collect this group's DSP chain and check for a convolution node.
-            struct Node { void* dsp; std::int32_t type; };
+            // Collect this group's DSP chain and check for a convolution node
+            // via name+type (never type alone).
+            struct Node { void* dsp; bool is_conv; };
             std::vector<Node> nodes;
             nodes.reserve(static_cast<std::size_t>(n));
             bool has_conv = false;
@@ -189,16 +262,15 @@ void walk_group(const FMODFns& fns, void* group, int depth,
                 void* dsp = nullptr;
                 if (!seh_call([&] { fns.get_dsp(reinterpret_cast<std::uint64_t>(group), i, &dsp); }) || !dsp)
                     continue;
-                std::int32_t t = -1;
-                if (fns.dsp_get_type) seh_call([&] { fns.dsp_get_type(dsp, &t); });
-                if (t == kTypeConvolutionReverb) has_conv = true;
-                nodes.push_back({dsp, t});
+                const bool conv = is_convolution(fns, dsp);
+                if (conv) has_conv = true;
+                nodes.push_back({dsp, conv});
             }
             if (has_conv) {
                 log::info("[graph] === group depth={} has convolution reverb ({} DSPs) ===", depth, n);
                 for (std::size_t i = 0; i < nodes.size(); ++i) {
                     dump_node(fns, nodes[i].dsp, static_cast<int>(i), depth);
-                    if (nodes[i].type == kTypeConvolutionReverb && g_found < kMaxFound) {
+                    if (nodes[i].is_conv && g_found < kMaxFound) {
                         dump_convolution(fns, nodes[i].dsp, out_dir);
                     }
                 }
@@ -261,14 +333,26 @@ void dump_lineage(const FMODFns& fns, const std::vector<void*>& stack) noexcept 
     }
 }
 
+// Trace diagnostics: kept SEPARATE from the convolution-reverb work. Counters
+// tell us whether the radio channel is reachable at all via Core getChannel,
+// and (via sampled DSP names) whether the name match is what failed.
+struct TraceStats {
+    int groups = 0;
+    int channels = 0;
+    int channels_with_dsp = 0;
+    int dsps = 0;
+    int names_logged = 0;
+};
+
 // Locate the RadioStreamFmod channel by finding our injected DSP (named
 // "FH6 Radio Rework") on some channel within the group tree. getParentGroup is
 // dead-code-eliminated, so instead of climbing up we enumerate every group's
 // channels and match on the DSP name, while the DFS stack records lineage.
 bool trace_radio(const FMODFns& fns, void* group, int depth,
-                 std::vector<void*>& stack) noexcept {
+                 std::vector<void*>& stack, TraceStats& st) noexcept {
     if (depth > kMaxDepth || !group) return false;
 
+    ++st.groups;
     stack.push_back(group);
 
     if (fns.group_get_num_channels && fns.group_get_channel) {
@@ -278,22 +362,33 @@ bool trace_radio(const FMODFns& fns, void* group, int depth,
             for (std::int32_t i = 0; i < nc; ++i) {
                 void* ch = nullptr;
                 if (!seh_call([&] { fns.group_get_channel(group, i, &ch); }) || !ch) continue;
+                ++st.channels;
                 std::int32_t nd = 0;
                 if (!fns.get_num_dsps ||
                     !seh_call([&] { fns.get_num_dsps(reinterpret_cast<std::uint64_t>(ch), &nd); }) || nd <= 0)
                     continue;
+                ++st.channels_with_dsp;
                 if (nd > kMaxDSPs) nd = kMaxDSPs;
                 for (std::int32_t j = 0; j < nd; ++j) {
                     void* dsp = nullptr;
                     if (!fns.get_dsp ||
                         !seh_call([&] { fns.get_dsp(reinterpret_cast<std::uint64_t>(ch), j, &dsp); }) || !dsp)
                         continue;
+                    ++st.dsps;
                     char name[32]{};
                     if (fns.dsp_get_info) {
                         std::uint32_t ver = 0; std::int32_t chans = -1, cw = -1, chh = -1;
                         seh_call([&] { fns.dsp_get_info(dsp, name, &ver, &chans, &cw, &chh); });
                     }
                     name[31] = '\0';
+                    // Sample a handful of channel-DSP names so we can tell apart
+                    // "no channels reachable" vs "channels reachable but name
+                    // mismatch". Independent of the convolution work.
+                    if (st.names_logged < 24) {
+                        log::info("[radio-route]   channel-DSP sample depth={} ch#{} dsp#{} name='{}'",
+                                  depth, i, j, name);
+                        ++st.names_logged;
+                    }
                     if (std::strcmp(name, "FH6 Radio Rework") == 0) {
                         log::info("[radio-route] FOUND RadioStreamFmod at depth={} channel_index={} dsp_index={}",
                                   depth, i, j);
@@ -314,7 +409,7 @@ bool trace_radio(const FMODFns& fns, void* group, int depth,
             for (std::int32_t i = 0; i < ng; ++i) {
                 void* child = nullptr;
                 if (!seh_call([&] { fns.group_get_group(group, i, &child); }) || !child) continue;
-                if (trace_radio(fns, child, depth + 1, stack)) { stack.pop_back(); return true; }
+                if (trace_radio(fns, child, depth + 1, stack, st)) { stack.pop_back(); return true; }
             }
         }
     }
@@ -347,11 +442,14 @@ bool scout_cockpit_reverb(const FMODFns& fns, void* system,
 
     // RadioStreamFmod-centered trace: find which group hosts our injected DSP
     // and dump that channel's chain + the full ancestor lineage to see the
-    // radio's downstream routing.
+    // radio's downstream routing. (Independent of the convolution-reverb work.)
     std::vector<void*> stack;
     stack.reserve(static_cast<std::size_t>(kMaxDepth) + 1);
-    const bool found_radio = trace_radio(fns, master, 0, stack);
-    log::info("[radio-route] trace done: radio group {}", found_radio ? "found" : "NOT found");
+    TraceStats st;
+    const bool found_radio = trace_radio(fns, master, 0, stack, st);
+    log::info("[radio-route] trace done: radio group {} (groups={} channels={} with_dsp={} dsps={})",
+              found_radio ? "found" : "NOT found", st.groups, st.channels,
+              st.channels_with_dsp, st.dsps);
     return g_found > 0;
 }
 

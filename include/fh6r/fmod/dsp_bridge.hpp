@@ -1,5 +1,6 @@
 #pragma once
 #include "fh6r/audio_ring.hpp"
+#include "fh6r/fmod/fmod_dsp_type.hpp"
 #include "fh6r/fmod/pe_image.hpp"
 #include "fh6r/fmod/radio_discovery.hpp"
 #include <atomic>
@@ -36,6 +37,9 @@ struct FMODFns {
     using GroupGetNumChannels = std::uint32_t (*)(void*, std::int32_t*);
     using GroupGetChannel = std::uint32_t (*)(void*, std::int32_t, void**);
     using DSPGetParameterData = std::uint32_t (*)(void*, std::int32_t, void**, std::uint32_t*, char*, std::int32_t);
+    // DSP::getParameterInfo -> FMOD_DSP_PARAMETER_DESC** (triple-verify the
+    // parameter layout: DATA/FLOAT/BOOL type per index).
+    using DSPGetParameterInfo = std::uint32_t (*)(void*, std::int32_t, DspParamDesc**);
     SystemCreateDSP system_create_dsp = nullptr;
     DSPRelease dsp_release = nullptr;
     AddDSP add_dsp = nullptr;
@@ -57,6 +61,7 @@ struct FMODFns {
     GroupGetNumChannels group_get_num_channels = nullptr;
     GroupGetChannel group_get_channel = nullptr;
     DSPGetParameterData dsp_get_parameter_data = nullptr;
+    DSPGetParameterInfo dsp_get_parameter_info = nullptr;
     std::byte* host_base = nullptr;
     bool ready() const noexcept { return host_base && dsp_release && add_dsp && remove_dsp && resolver && unlock; }
     // Probe APIs are optional to audio injection; present iff each anchor resolved uniquely.
