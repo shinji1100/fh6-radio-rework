@@ -28,6 +28,10 @@ constexpr const char* kGetDescriptionThunk =
     "48 83 EC 28 48 8B 09 48 C7 44 24 30 00 00 00 00 "
     "48 85 C9 74 ?? 48 8D 54 24 30 E8 ?? ?? ?? ?? "
     "48 8B 44 24 30 48 83 C4 28 C3";
+constexpr const char* kGetPlaybackState =
+    "48 89 5C 24 18 55 56 57 48 81 EC 60 01 00 00 "
+    "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 50 01 00 00 "
+    "48 8B F2 48 8B E9 48 85 D2";
 
 struct HandleCandidate {
     const char* source = nullptr;
@@ -76,9 +80,10 @@ void probe_radio_acoustics(const PEImage& img, const RadioInstance& radio,
             current_rc = fns.channel_get_current_sound(wrapper_channel, &current_sound);
         });
     }
-    log::info("[radio-acoustics] Channel::getCurrentSound rc={} sound=0x{:X} seh_ok={} wrapper_match={}",
+    const auto discovered_sound = reinterpret_cast<std::uint64_t>(radio.fmod_sound);
+    log::info("[radio-acoustics] Channel::getCurrentSound rc={} sound=0x{:X} seh_ok={} discovery_match={} packed_handle=0x{:X}",
               current_rc, current_sound, current_ok,
-              current_rc == 0 && current_sound == wrapper_sound);
+              current_rc == 0 && current_sound == discovered_sound, wrapper_sound);
 
     std::uint32_t mode = 0;
     std::uint32_t mode_rc = ~0u;
@@ -96,7 +101,7 @@ void probe_radio_acoustics(const PEImage& img, const RadioInstance& radio,
     }
 
     auto get_playback = reinterpret_cast<EventGetPlaybackState>(
-        resolve_studio_anchor(img, "EventInstance::getPlaybackState"));
+        find_by_anchor(img, "EventInstance::getPlaybackState", kGetPlaybackState));
     auto get_description = reinterpret_cast<GetDescriptionThunk>(
         find_by_pattern(img, kGetDescriptionThunk));
     auto is_3d = reinterpret_cast<EventDescBool>(
@@ -164,6 +169,16 @@ void probe_radio_acoustics(const PEImage& img, const RadioInstance& radio,
         log::info("[radio-acoustics] no EventInstance among verified direct wrapper handle fields; Core mode result remains authoritative for the injected stream (not a global absence proof)");
     } else if (event_matches > 1) {
         log::warn("[radio-acoustics] {} EventInstance-looking handles; refusing ambiguous identity", event_matches);
+    }
+
+    if (current_ok && current_rc == 0 && current_sound == discovered_sound &&
+        mode_ok && mode_rc == 0) {
+        log::info("[radio-acoustics] DECISION: active injected Radio sound is {} {} [PROVEN]; {}",
+                  (mode & kMode3D) ? "3D" : ((mode & kMode2D) ? "2D" : "dimension-unknown"),
+                  (mode & kCreateStream) ? "STREAM" : "SAMPLE",
+                  (mode & kMode3D)
+                      ? "native 3D routing remains a candidate"
+                      : "use the custom cabin DSP for interior/exterior acoustics");
     }
 
     log::info("[radio-acoustics] ===== done =====");
