@@ -3,14 +3,23 @@
 
 namespace fh6r::fmod {
 
-// Step 2: locate the Studio::System handle storage by resolving the Studio
-// factory / lifecycle methods (System::create, System::getCoreSystem,
-// System::initialize, System::update) and scanning .text for direct call xrefs
-// from FH6 code. For each xref it dumps the preceding bytes so the RCX source
-// (the Studio System out-parameter / handle) can be traced.
+// Trace the System::create call site's RCX source (the Studio::System** out-slot
+// address), read the base value, apply the accumulated displacement, and read
+// the Studio::System* handle out of that slot.
 //
-// Read-only: it resolves addresses and reads .text, never calls the APIs and
-// never writes. Runs once at startup.
+// Read-only with respect to game code/data: it resolves addresses, reads .text,
+// and reads the handle slot — never calls the Studio API and never writes.
+// Returns the Studio System pointer, or nullptr if it cannot be resolved or the
+// slot is not yet populated (i.e. System::create has not run yet at the time of
+// the call). Safe to call repeatedly, so callers can retry at a later moment.
+void* locate_studio_system_handle(const PEImage& img) noexcept;
+
+// Step 2 (continued): locate the Studio System handle and verify its identity.
+// Resolves System::create / getCoreSystem / getBankCount / getBankList, scans
+// .text for the create() xref, traces RCX -> handle slot, reads the handle, and
+// reports getCoreSystem (Core identity) + getBankCount (FMOD_OK + loaded-bank
+// count). Read-only; retries briefly because System::create may run a moment
+// after DLL load. Only FMOD read queries are issued.
 void scout_studio_system(const PEImage& img) noexcept;
 
 } // namespace fh6r::fmod
