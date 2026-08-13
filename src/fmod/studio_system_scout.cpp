@@ -37,6 +37,13 @@ struct Insn {
     int len = 0;
 };
 
+// Read a disp32 at q as a signed 32-bit value (memcpy avoids unaligned reads).
+inline std::int32_t read_disp32(const std::byte* q) noexcept {
+    std::int32_t v = 0;
+    std::memcpy(&v, q, 4);
+    return v;
+}
+
 // Decode a mov/lea instruction at q (with REX.W/R/X/B, r8-r15 covered). Returns
 // length or 0 if not a recognized shape.
 //
@@ -79,7 +86,7 @@ int decode(const std::byte* q, const std::byte* end, Insn& out) {
     bool rip_rel = false;
     if (mod == 0 && rm == 5) {  // [rip+disp32] — special encoding, REX.B does NOT apply
         if (end - q < len + 4) return 0;
-        disp = std::to_integer<std::int32_t>(*reinterpret_cast<const std::int32_t*>(q + len));
+        disp = read_disp32(q + len);
         len += 4;
         rip_rel = true;
     } else if (rm == 4) {  // SIB
@@ -91,7 +98,7 @@ int decode(const std::byte* q, const std::byte* end, Insn& out) {
         base = s_base | (rex_b ? 8 : 0);
         if (mod == 0 && s_base == 5) {  // disp32 only
             if (end - q < len + 4) return 0;
-            disp = std::to_integer<std::int32_t>(*reinterpret_cast<const std::int32_t*>(q + len));
+            disp = read_disp32(q + len);
             len += 4;
             base = -1;
             rip_rel = true;
@@ -100,7 +107,7 @@ int decode(const std::byte* q, const std::byte* end, Insn& out) {
             disp = static_cast<std::int8_t>(std::to_integer<std::uint8_t>(q[len])); len += 1;
         } else if (mod == 2) {
             if (end - q < len + 4) return 0;
-            disp = std::to_integer<std::int32_t>(*reinterpret_cast<const std::int32_t*>(q + len));
+            disp = read_disp32(q + len);
             len += 4;
         }
     } else {
@@ -110,7 +117,7 @@ int decode(const std::byte* q, const std::byte* end, Insn& out) {
             disp = static_cast<std::int8_t>(std::to_integer<std::uint8_t>(q[len])); len += 1;
         } else if (mod == 2) {
             if (end - q < len + 4) return 0;
-            disp = std::to_integer<std::int32_t>(*reinterpret_cast<const std::int32_t*>(q + len));
+            disp = read_disp32(q + len);
             len += 4;
         }
     }
@@ -152,7 +159,7 @@ struct RcxTrace {
 RcxTrace trace_rcx_addr(std::byte* call_site) noexcept {
     RcxTrace out;
     int reg = R_RCX;
-    std::byte* pos = call_site;
+    const std::byte* pos = call_site;
 
     for (int layer = 0; layer < 8; ++layer) {
         bool advanced = false;
@@ -233,7 +240,7 @@ std::byte* read_handle_from_site(std::byte* site) noexcept {
 
 } // namespace
 
-void* locate_studio_system_handle(const PEImage& img) noexcept {
+std::byte* locate_studio_system_handle(const PEImage& img) noexcept {
     if (!img.valid()) return nullptr;
     std::byte* create_fn = resolve_studio_anchor(img, "System::create");
     if (!create_fn) {

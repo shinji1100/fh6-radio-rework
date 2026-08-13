@@ -1,5 +1,6 @@
 #pragma once
 #include "fh6r/fmod/pe_image.hpp"
+#include <cstddef>
 
 namespace fh6r::fmod {
 
@@ -12,7 +13,7 @@ namespace fh6r::fmod {
 // Returns the Studio System pointer, or nullptr if it cannot be resolved or the
 // slot is not yet populated (i.e. System::create has not run yet at the time of
 // the call). Safe to call repeatedly, so callers can retry at a later moment.
-void* locate_studio_system_handle(const PEImage& img) noexcept;
+std::byte* locate_studio_system_handle(const PEImage& img) noexcept;
 
 // Step 2 (continued): locate the Studio System handle and verify its identity.
 // Resolves System::create / getCoreSystem / getBankCount / getBankList, scans
