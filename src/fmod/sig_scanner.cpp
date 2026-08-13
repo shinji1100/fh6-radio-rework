@@ -111,4 +111,21 @@ std::byte* find_by_pattern(const PEImage& img, std::string_view pattern) noexcep
     if (!hit) log::warn("[sig] direct pattern not found");
     return hit;
 }
+
+std::vector<std::byte*> scout_anchor(const PEImage& img, std::string_view anchor) noexcept {
+    std::vector<std::byte*> out;
+    if (!img.valid()) return out;
+    auto a = anchors(img, anchor);
+    if (a.empty()) return out;
+    auto l = leas_to(img, a);
+    for (const std::byte* lea : l) {
+        const auto rva = static_cast<std::uint32_t>(lea - img.base);
+        auto it = std::ranges::upper_bound(img.function_rvas, rva);
+        if (it == img.function_rvas.begin()) continue;
+        --it;
+        auto* fn = img.base + *it;
+        if (std::ranges::find(out, fn) == out.end()) out.push_back(fn);
+    }
+    return out;
+}
 } // namespace fh6r::fmod

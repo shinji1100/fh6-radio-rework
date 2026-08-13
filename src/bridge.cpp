@@ -3,6 +3,7 @@
 #include "fh6r/fmod/controller.hpp"
 #include "fh6r/fmod/dsp_bridge.hpp"
 #include "fh6r/fmod/pe_image.hpp"
+#include "fh6r/fmod/sig_scout.hpp"
 #include "fh6r/http/http_server.hpp"
 #include "fh6r/log.hpp"
 #include "fh6r/wasapi_capture.hpp"
@@ -49,6 +50,11 @@ void run_bridge(HMODULE self) noexcept {
         if (!image.valid()) log::error("[bridge] could not parse game PE image");
         else if (!fmod::resolve_fmod_signatures(image, fns))
             log::error("[bridge] one or more mandatory FMOD signatures were not resolved");
+
+        // Phase 1 audio-state probe: scout the wider FMOD API surface so the
+        // next iteration gets confirmed byte patterns for the cabin-acoustics
+        // state enumerator. Read-only, runs once at startup.
+        if (image.valid()) fmod::scout_apis(image);
 
         fmod::DSPBridge dsp{ring, fns};
         dsp.set_gain(cfg.gain);

@@ -39,6 +39,7 @@ add_library(version SHARED
   src/http/http_server.cpp
   src/fmod/pe_image.cpp
   src/fmod/sig_scanner.cpp
+  src/fmod/sig_scout.cpp
   src/fmod/radio_discovery.cpp
   src/fmod/dsp_bridge.cpp
   src/fmod/controller.cpp
