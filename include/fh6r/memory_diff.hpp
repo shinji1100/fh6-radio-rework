@@ -1,6 +1,7 @@
 #pragma once
 #include "fh6r/fmod/pe_image.hpp"
 #include <string>
+#include <string_view>
 
 namespace fh6r {
 
@@ -24,6 +25,13 @@ public:
     int captures() const noexcept;
     std::size_t region_size() const noexcept;
     std::string result_json() const; // {"captures", "region_base", "candidates":[{offset,s1,s2,s3}]}
+
+    // Six-view mapper. Capture every named view once for round 1, then once
+    // again for round 2. Only candidates reproducing the same value map in
+    // both rounds survive.
+    bool capture_view(std::string_view name) noexcept;
+    void reset_view_map() noexcept;
+    std::string view_map_json() const;
 private:
     struct Impl;
     Impl* impl_ = nullptr;

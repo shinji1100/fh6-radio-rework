@@ -204,6 +204,14 @@ label{display:block;margin:12px 0 6px;color:#abb5bf}select,input[type=range]{wid
 <div class="row"><button id="mdCapture">capture</button><button id="mdReset">reset</button></div>
 <p class="muted">停车、不换车：驾驶舱点 capture → 切到追尾点 capture → 切回驾驶舱点 capture（第 3 次自动分析，列出随视角翻转的内存位）。</p>
 <div id="md" class="muted">—</div></section>
+<section class="card"><h2>六视角映射（只读）</h2>
+<p class="muted">停车且不换车。第一轮依次切到每个视角并点对应按钮；六个都完成后，再重复第二轮。每个按钮最终应显示 2/2。</p>
+<div class="row">
+<button data-view="dashboard">仪表盘</button><button data-view="cockpit">驾驶位</button>
+<button data-view="chase_near">追尾 1</button><button data-view="chase_far">追尾 2</button>
+<button data-view="hood">引擎盖</button><button data-view="bumper">保险杠/车头</button>
+<button id="viewReset">重置六视角采集</button></div>
+<div id="viewMap" class="muted">尚未采集</div></section>
 </main><script>
 const $=id=>document.getElementById(id);let state=null;
 async function api(path,opt){const r=await fetch(path,opt);if(!r.ok)throw new Error(await r.text());const t=await r.text();return t?JSON.parse(t):{};}
@@ -227,6 +235,9 @@ $('saveChase').onclick=async()=>{await api('/api/probe/snapshot',{method:'POST',
 $('compare').onclick=async()=>{try{const c=await api('/api/probe/compare',{method:'POST',headers:{'Content-Type':'text/plain'},body:'cockpit,chase'});$('cmp').textContent=c.changes&&c.changes.length?('变化: '+JSON.stringify(c.changes)):(c.error||'无变化');}catch(e){$('cmp').textContent=String(e)}};
 $('mdCapture').onclick=async()=>{try{const r=await api('/api/memdiff/capture',{method:'POST'});$('md').textContent='已捕获 '+r.captures+'/3'+(r.candidates&&r.candidates.length?(' · 候选 '+r.candidates.length+' 个：'+r.candidates.slice(0,20).map(c=>c.offset+'['+c.s1+'→'+c.s2+'→'+c.s3+']').join(' ')):'');}catch(e){$('md').textContent=String(e)}};
 $('mdReset').onclick=async()=>{try{await api('/api/memdiff/reset',{method:'POST'});$('md').textContent='已重置';}catch(e){$('md').textContent=String(e)}};
+function showViewMap(r){const labels={dashboard:'仪表盘',cockpit:'驾驶位',chase_near:'追尾1',chase_far:'追尾2',hood:'引擎盖',bumper:'保险杠'};let s='阶段: '+r.phase+' · ';for(const [k,v] of Object.entries(r.counts||{}))s+=labels[k]+': '+v+'/2  ';if(r.phase==='complete')s+=' · 稳定候选: '+(r.candidates||[]).length;$('viewMap').textContent=s;}
+document.querySelectorAll('[data-view]').forEach(b=>b.onclick=async()=>{try{showViewMap(await api('/api/viewmap/capture',{method:'POST',headers:{'Content-Type':'text/plain'},body:b.dataset.view}))}catch(e){$('viewMap').textContent=String(e)}});
+$('viewReset').onclick=async()=>{try{showViewMap(await api('/api/viewmap/reset',{method:'POST'}))}catch(e){$('viewMap').textContent=String(e)}};
 (async()=>{await refresh();await devices();refreshProbe();setInterval(refresh,1000);setInterval(refreshProbe,1000)})();
 </script></body></html>)HTML";
 }
@@ -426,6 +437,19 @@ struct HttpServer::Impl {
         }
         if (req.method == "GET" && req.path == "/api/memdiff/result") {
             respond(client, 200, memdiff.result_json()); return;
+        }
+        if (req.method == "POST" && req.path == "/api/viewmap/capture") {
+            if (!memdiff.capture_view(req.body)) {
+                respond(client, 400, "{\"error\":\"invalid view label, duplicate, or wrong round order\"}");
+                return;
+            }
+            respond(client, 200, memdiff.view_map_json()); return;
+        }
+        if (req.method == "POST" && req.path == "/api/viewmap/reset") {
+            memdiff.reset_view_map(); respond(client, 200, memdiff.view_map_json()); return;
+        }
+        if (req.method == "GET" && req.path == "/api/viewmap/result") {
+            respond(client, 200, memdiff.view_map_json()); return;
         }
         if (req.method == "POST" && req.path == "/api/capture/start") {
             if (!capture.start()) { respond(client,400,"{\"error\":\"capture start failed\"}"); return; }
