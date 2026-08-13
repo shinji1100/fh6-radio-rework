@@ -4,6 +4,7 @@
 #include "fh6r/safe_mem.hpp"
 
 #include <chrono>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -24,6 +25,9 @@ const char* reg_name(int r) {
 constexpr int R_RCX = 1;
 constexpr int R_RSP = 4;
 constexpr int R_RBP = 5;
+
+std::atomic<std::byte*> g_studio_handle{nullptr};
+std::atomic<void*> g_studio_core{nullptr};
 
 // A decoded mov/lea instruction (the only shapes we care about for tracing).
 struct Insn {
@@ -280,15 +284,9 @@ std::byte* read_studio_via_getcore(std::byte* site) noexcept {
     return nullptr;
 }
 
-} // namespace
-
-std::byte* locate_studio_system_handle(const PEImage& img) noexcept {
-    if (!img.valid()) return nullptr;
-
-    // Preferred path: the getCoreSystem() call site carries a self-contained
-    // two-level deref (mov rcx,[rip+G]; mov rcx,[rcx+slot]), no provenance trace
-    // needed. Scan its xrefs first.
-    std::byte* get_core_fn = resolve_studio_anchor(img, "System::getCoreSystem");
+std::byte* locate_studio_system_handle_with_fns(const PEImage& img,
+                                                std::byte* get_core_fn,
+                                                std::byte* create_fn) noexcept {
     log::info("[studio-system] get_core_fn=0x{:X}", reinterpret_cast<std::uintptr_t>(get_core_fn));
     if (get_core_fn) {
         int e8_matches = 0;
@@ -317,7 +315,6 @@ std::byte* locate_studio_system_handle(const PEImage& img) noexcept {
     }
 
     // Fallback: trace the create() call site's RCX source (lea [rsi+0x4C918]).
-    std::byte* create_fn = resolve_studio_anchor(img, "System::create");
     if (!create_fn) {
         log::info("[studio-system] System::create not uniquely resolved -> cannot locate handle");
         return nullptr;
@@ -345,6 +342,24 @@ std::byte* locate_studio_system_handle(const PEImage& img) noexcept {
     return nullptr;
 }
 
+} // namespace
+
+std::byte* locate_studio_system_handle(const PEImage& img) noexcept {
+    if (!img.valid()) return nullptr;
+    return locate_studio_system_handle_with_fns(
+        img,
+        resolve_studio_anchor(img, "System::getCoreSystem"),
+        resolve_studio_anchor(img, "System::create"));
+}
+
+StudioSystemSnapshot studio_system_snapshot() noexcept {
+    StudioSystemSnapshot out;
+    out.handle = g_studio_handle.load(std::memory_order_acquire);
+    out.core_system = g_studio_core.load(std::memory_order_acquire);
+    out.valid = out.handle && out.core_system;
+    return out;
+}
+
 void scout_studio_system(const PEImage& img) noexcept {
     if (!img.valid()) { log::warn("[studio-system] image invalid, skipping"); return; }
     log::info("[studio-system] ===== locate + verify Studio System handle =====");
@@ -359,12 +374,12 @@ void scout_studio_system(const PEImage& img) noexcept {
               reinterpret_cast<std::uintptr_t>(fns[2]),
               reinterpret_cast<std::uintptr_t>(fns[3]));
 
-    // System::create may run a moment after DLL load (the game initializes FMOD
-    // on the main thread). Retry briefly so a single startup capture usually
-    // lands after the handle is populated.
+    // Reuse the already-resolved addresses across retries. Re-resolving and
+    // rescanning the full text image on every attempt made a failed startup
+    // probe take minutes and obscured which build had actually been exercised.
     std::byte* studio = nullptr;
     for (int attempt = 0; attempt < 10 && !studio; ++attempt) {
-        studio = locate_studio_system_handle(img);
+        studio = locate_studio_system_handle_with_fns(img, fns[1], fns[0]);
         if (!studio) {
             log::info("[studio-system] handle not populated (attempt {}/10), waiting 1s", attempt + 1);
             std::this_thread::sleep_for(1s);
@@ -376,7 +391,7 @@ void scout_studio_system(const PEImage& img) noexcept {
     }
     log::info("[studio-system] STUDIO SYSTEM HANDLE = 0x{:X}", reinterpret_cast<std::uintptr_t>(studio));
 
-    // Identity: getCoreSystem -> core A (to be compared with resolve_fmod_system's
+    // Identity: getCoreSystem -> core A (compared with resolve_fmod_system's
     // core B once a RadioStreamFmod is attached; FMOD Studio 2.03 C ABI:
     // RCX = FMOD_STUDIO_SYSTEM* system, RDX = FMOD_SYSTEM** coresystem).
     if (fns[1]) {
@@ -385,23 +400,24 @@ void scout_studio_system(const PEImage& img) noexcept {
         void* core = nullptr;
         std::uint32_t rc = 0xFFFFFFFF;
         const bool ok = seh_call([&] { rc = fn(studio, &core); });
+        const bool valid = ok && rc == 0 && core;
         log::info("[studio-system] getCoreSystem rc={} core=0x{:X}{}", rc,
                   reinterpret_cast<std::uintptr_t>(core),
-                  ok ? "" : " (seh-failed)");
+                  valid ? " -> Studio System VALID (opaque handle)" : (ok ? "" : " (seh-failed)"));
+        if (valid) {
+            g_studio_handle.store(studio, std::memory_order_release);
+            g_studio_core.store(core, std::memory_order_release);
+        }
     }
 
-    // Liveness: getBankCount -> FMOD_OK + a reasonable count proves the handle
-    // is a live Studio System. RCX = system, RDX = int* count.
-    if (fns[2]) {
-        using GetBankCount = std::uint32_t (*)(void*, std::int32_t*);
-        auto fn = reinterpret_cast<GetBankCount>(fns[2]);
-        std::int32_t count = -1;
-        std::uint32_t rc = 0xFFFFFFFF;
-        const bool ok = seh_call([&] { rc = fn(studio, &count); });
-        const bool valid = ok && rc == 0 && count > 0;
-        log::info("[studio-system] getBankCount rc={} count={}{}", rc, count,
-                  valid ? " -> Studio System VALID" : "");
-    }
+    // Runtime disassembly proved these name-anchor candidates are diagnostic /
+    // formatting helpers, not the public two-/four-argument Studio methods:
+    // the getBankCount candidate reads R8 and RCX+0x10, and has no call xrefs.
+    // Calling it as (system, int*) caused the observed SEH. Keep the addresses
+    // visible for RE work, but do not turn an anchor ownership guess into ABI.
+    log::info("[studio-system] getBankCount/getBankList anchor candidates 0x{:X}/0x{:X} NOT CALLED (ABI unverified)",
+              reinterpret_cast<std::uintptr_t>(fns[2]),
+              reinterpret_cast<std::uintptr_t>(fns[3]));
 
     log::info("[studio-system] ===== done =====");
 }

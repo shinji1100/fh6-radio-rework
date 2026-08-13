@@ -2,6 +2,7 @@
 #include "fh6r/fmod/event_instance_probe.hpp"
 #include "fh6r/fmod/radio_discovery.hpp"
 #include "fh6r/fmod/sig_scanner.hpp"
+#include "fh6r/fmod/studio_system_scout.hpp"
 #include "fh6r/log.hpp"
 #include "fh6r/safe_mem.hpp"
 #include <chrono>
@@ -182,6 +183,22 @@ bool Controller::discover_target() noexcept {
     if (!event_probed_) {
         event_probed_ = true;
         probe_event_instance(image_, active->radio_stream);
+    }
+
+    if (!studio_identity_checked_) {
+        const auto studio = studio_system_snapshot();
+        if (studio.valid) {
+            studio_identity_checked_ = true;
+            if (studio.core_system == active_system) {
+                log::info("[studio-system] identity closure: studio_core=0x{:X} radio_core=0x{:X} -> MATCH [PROVEN]",
+                          reinterpret_cast<std::uintptr_t>(studio.core_system),
+                          reinterpret_cast<std::uintptr_t>(active_system));
+            } else {
+                log::warn("[studio-system] identity closure: studio_core=0x{:X} radio_core=0x{:X} -> MISMATCH",
+                          reinterpret_cast<std::uintptr_t>(studio.core_system),
+                          reinterpret_cast<std::uintptr_t>(active_system));
+            }
+        }
     }
 
     bridge_.set_target(*active, active_system);
