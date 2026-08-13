@@ -22,7 +22,7 @@ struct Speaker {
 };
 
 struct Layout {
-    std::array<Speaker, CabinDSP::kMaxSpeakers> speakers;
+    Speaker speakers[CabinDSP::kMaxSpeakers];
     int count;
     float normalization;
 };
@@ -30,26 +30,26 @@ struct Layout {
 // The layout is listener-relative. Negative azimuth is left, positive is
 // right. Speaker distances become short acoustic delays; rear speakers also
 // consume rear_fill and rear_delay_ms.
-constexpr std::array<Layout, 4> kLayouts{{
-    {{{
+constexpr Layout kLayouts[] = {
+    {{
         {1.00f, 0.05f, -0.47f, 2.4f, 0.78f, 0.0f},
         {0.05f, 1.00f,  0.47f, 3.0f, 0.78f, 0.0f},
-    }}}, 2, 0.90f},
-    {{{
+    }, 2, 0.90f},
+    {{
         {1.00f, 0.06f, -0.50f, 2.3f, 0.72f, 0.0f},
         {0.06f, 1.00f,  0.50f, 3.0f, 0.72f, 0.0f},
         {0.82f, 0.18f, -0.82f, 4.4f, 0.40f, 1.0f},
         {0.18f, 0.82f,  0.82f, 5.0f, 0.40f, 1.0f},
-    }}}, 4, 0.78f},
-    {{{
+    }, 4, 0.78f},
+    {{
         {1.00f, 0.05f, -0.48f, 2.2f, 0.64f, 0.0f},
         {0.05f, 1.00f,  0.48f, 2.9f, 0.64f, 0.0f},
         {0.90f, 0.10f, -0.90f, 3.1f, 0.34f, 0.25f},
         {0.10f, 0.90f,  0.90f, 3.8f, 0.34f, 0.25f},
         {0.76f, 0.24f, -0.70f, 4.8f, 0.28f, 1.0f},
         {0.24f, 0.76f,  0.70f, 5.4f, 0.28f, 1.0f},
-    }}}, 6, 0.72f},
-    {{{
+    }, 6, 0.72f},
+    {{
         {1.00f, 0.04f, -0.46f, 2.2f, 0.58f, 0.0f},
         {0.04f, 1.00f,  0.46f, 2.9f, 0.58f, 0.0f},
         {0.88f, 0.12f, -0.98f, 3.2f, 0.30f, 0.30f},
@@ -58,8 +58,8 @@ constexpr std::array<Layout, 4> kLayouts{{
         {0.24f, 0.76f,  0.70f, 5.4f, 0.24f, 1.0f},
         {0.50f, 0.50f,  0.00f, 2.6f, 0.18f, 0.0f},
         {0.50f, 0.50f,  0.00f, 6.0f, 0.13f, 1.0f},
-    }}}, 8, 0.66f},
-}};
+    }, 8, 0.66f},
+};
 
 struct Profile {
     float early_gain;
@@ -213,7 +213,7 @@ bool CabinDSP::set_profile_name(std::string_view name) noexcept {
 }
 
 void CabinDSP::set_speaker_layout(SpeakerLayout layout) noexcept {
-    if (static_cast<int>(layout) < 0 || static_cast<int>(layout) >= static_cast<int>(kLayouts.size()))
+    if (static_cast<int>(layout) < 0 || static_cast<int>(layout) >= static_cast<int>(std::size(kLayouts)))
         layout = SpeakerLayout::Premium6;
     layout_.store(layout, std::memory_order_release);
 }
