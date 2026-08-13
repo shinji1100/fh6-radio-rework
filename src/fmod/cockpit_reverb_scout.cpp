@@ -33,12 +33,17 @@ int g_found = 0;
 void dump_convolution(const FMODFns& fns, void* dsp, const std::string& out_dir) noexcept {
     const int seq = g_found++;
 
-    float wet = 0, dry = 0, linked = 0;
+    float wet = 0, dry = 0;
+    std::int32_t linked = -1;
+    char vs[64]{};
     if (fns.dsp_get_parameter_float) {
-        char vs[64]{};
-        seh_call([&] { fns.dsp_get_parameter_float(dsp, kParamWet, &wet, vs); });
-        seh_call([&] { fns.dsp_get_parameter_float(dsp, kParamDry, &dry, vs); });
-        seh_call([&] { fns.dsp_get_parameter_float(dsp, kParamLinked, &linked, vs); });
+        seh_call([&] { fns.dsp_get_parameter_float(dsp, kParamWet, &wet, vs, sizeof(vs)); });
+        seh_call([&] { fns.dsp_get_parameter_float(dsp, kParamDry, &dry, vs, sizeof(vs)); });
+    }
+    // LINKED is a bool (FMOD_BOOL = int); getParameterBool was dead-code-eliminated
+    // in this build, so read it via getParameterInt.
+    if (fns.dsp_get_parameter_int) {
+        seh_call([&] { fns.dsp_get_parameter_int(dsp, kParamLinked, &linked, vs, sizeof(vs)); });
     }
 
     void* data = nullptr;
@@ -51,7 +56,7 @@ void dump_convolution(const FMODFns& fns, void* dsp, const std::string& out_dir)
         });
     }
 
-    log::info("[cockpit-reverb] DSP #{} wet={:.3f} dry={:.3f} linked={:.3f} ir_read={} ir_len={}B",
+    log::info("[cockpit-reverb] DSP #{} wet={:.3f} dry={:.3f} linked={} ir_read={} ir_len={}B",
               seq, wet, dry, linked, read_ok ? "ok" : "fail", length);
 
     if (!read_ok || !data || length <= 2) {

@@ -104,7 +104,7 @@ void AudioStateProbe::sample() noexcept {
                             for (std::int32_t k = 0; k < p; ++k) {
                                 float v = 0;
                                 char vs[64]{};
-                                seh_call([&] { fns.dsp_get_parameter_float(dsp, k, &v, vs); });
+                                seh_call([&] { fns.dsp_get_parameter_float(dsp, k, &v, vs, sizeof(vs)); });
                                 d.params[k] = v;
                             }
                         }
