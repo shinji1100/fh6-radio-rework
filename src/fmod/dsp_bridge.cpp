@@ -76,6 +76,10 @@ bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
         resolve_by_anchor_unique(img, "ChannelGroup::getNumGroups"));
     out.group_get_group = reinterpret_cast<FMODFns::GroupGetGroup>(
         resolve_by_anchor_unique(img, "ChannelGroup::getGroup"));
+    out.group_get_num_channels = reinterpret_cast<FMODFns::GroupGetNumChannels>(
+        resolve_by_anchor_unique(img, "ChannelGroup::getNumChannels"));
+    out.group_get_channel = reinterpret_cast<FMODFns::GroupGetChannel>(
+        resolve_by_anchor_unique(img, "ChannelGroup::getChannel"));
     out.dsp_get_parameter_data = reinterpret_cast<FMODFns::DSPGetParameterData>(
         resolve_by_anchor_unique(img, "DSP::getParameterData"));
     log::info("[fmod] create=0x{:X} release=0x{:X} add=0x{:X} remove=0x{:X} resolver=0x{:X} unlock=0x{:X}",

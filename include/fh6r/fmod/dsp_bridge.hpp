@@ -33,6 +33,8 @@ struct FMODFns {
     using SysGetMasterChannelGroup = std::uint32_t (*)(void*, void**);
     using GroupGetNumGroups = std::uint32_t (*)(void*, std::int32_t*);
     using GroupGetGroup = std::uint32_t (*)(void*, std::int32_t, void**);
+    using GroupGetNumChannels = std::uint32_t (*)(void*, std::int32_t*);
+    using GroupGetChannel = std::uint32_t (*)(void*, std::int32_t, void**);
     using DSPGetParameterData = std::uint32_t (*)(void*, std::int32_t, void**, std::uint32_t*, char*, std::int32_t);
     SystemCreateDSP system_create_dsp = nullptr;
     DSPRelease dsp_release = nullptr;
@@ -52,6 +54,8 @@ struct FMODFns {
     SysGetMasterChannelGroup get_master_channel_group = nullptr;
     GroupGetNumGroups group_get_num_groups = nullptr;
     GroupGetGroup group_get_group = nullptr;
+    GroupGetNumChannels group_get_num_channels = nullptr;
+    GroupGetChannel group_get_channel = nullptr;
     DSPGetParameterData dsp_get_parameter_data = nullptr;
     std::byte* host_base = nullptr;
     bool ready() const noexcept { return host_base && dsp_release && add_dsp && remove_dsp && resolver && unlock; }
