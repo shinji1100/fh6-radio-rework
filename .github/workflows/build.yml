@@ -32,6 +32,10 @@ jobs:
         run: cmake -S . -B build -A x64
       - name: Build
         run: cmake --build build --config Release --parallel
+      - name: Configure camera re probe
+        run: cmake -S probes/camera_re_probe -B build-probe -A x64
+      - name: Build camera re probe
+        run: cmake --build build-probe --config Release --parallel
       - name: Stage package
         shell: pwsh
         run: |
@@ -46,4 +50,10 @@ jobs:
         with:
           name: fh6-radio-rework-windows-x64
           path: dist/fh6-radio-rework
+          if-no-files-found: error
+      - name: Upload camera re probe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: camera-re-probe
+          path: build-probe/Release/camera_re_probe.dll
           if-no-files-found: error
