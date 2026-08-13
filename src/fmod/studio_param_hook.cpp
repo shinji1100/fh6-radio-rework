@@ -4,7 +4,6 @@
 #include "fh6r/safe_mem.hpp"
 
 #include <windows.h>
-#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -14,261 +13,163 @@
 namespace fh6r::fmod {
 namespace {
 
-// FMOD Studio setter ABIs (x64): RCX=this, RDX=name/id, XMM2=value, R9=ignoreSeekSpeed.
-// FMOD_STUDIO_PARAMETER_ID is { uint32 data1; uint32 data2; } -> passed as one u64 in RDX.
-using SetParamByNameFn = std::uint32_t (*)(void*, const char*, float, bool);
-using SetParamByIDFn   = std::uint32_t (*)(void*, std::uint64_t, float, bool);
+// FMOD Studio setter ABI (x64): RCX=this, RDX=id, XMM2=value, R9=ignoreSeekSpeed.
+// FMOD_STUDIO_PARAMETER_ID = { uint32 data1; uint32 data2; } -> one u64 in RDX.
+using SetParamByIDFn = std::uint32_t (*)(void*, std::uint64_t, float, bool);
 
-std::atomic<std::uint64_t> g_by_name_total{0};
-std::atomic<std::uint64_t> g_by_id_total{0};
+SetParamByIDFn g_orig_by_id = nullptr;
 
-// Trampoline storage written BEFORE the target is patched, so there is no
-// window where the hook runs with a null original pointer.
-void* g_tramp_name = nullptr;
-void* g_tramp_id   = nullptr;
+// The shared logging/dispatch function that references every Studio name string.
+constexpr std::uint8_t kDispatch[8] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56, 0x57};
 
-// Conservative x86-64 instruction-length decoder for *prologue relocation*.
-// Walks complete instructions starting at `code`, accumulating until >= min_len
-// bytes are covered, and returns the byte count (guaranteed instruction
-// boundary). Returns 0 (bail) on anything not safely relocatable:
-//   - mod==00 addressing (covers RIP-relative and absolute [disp32])
-//   - branches/calls/unrecognised opcodes
-// Only the register/stack forms seen in MSVC function prologues are accepted.
-std::size_t safe_prologue_len(const std::uint8_t* code, std::size_t avail,
-                              std::size_t min_len) noexcept {
-    std::size_t pos = 0;
-    while (pos < min_len) {
-        if (pos >= avail) return 0;
-        std::uint8_t b = code[pos];
-        std::size_t insn = 0;
-
-        // REX prefix (0x40..0x4F)
-        if (b >= 0x40 && b <= 0x4F) {
-            ++insn;
-            if (pos + insn >= avail) return 0;
-            b = code[pos + insn];
-        }
-        ++insn; // opcode byte
-
-        switch (b) {
-            // push/pop r64 / r8-r15 (no ModRM)
-            case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55:
-            case 0x56: case 0x57: case 0x58: case 0x59: case 0x5A: case 0x5B:
-            case 0x5C: case 0x5D: case 0x5E: case 0x5F:
-                break;
-
-            // MOV / LEA / ADD / SUB / XOR / MOVSXD (ModRM)
-            case 0x89: case 0x8B: case 0x8D: case 0x8A: case 0x88:
-            case 0x03: case 0x2B: case 0x33: case 0x63: {
-                if (pos + insn >= avail) return 0;
-                const std::uint8_t modrm = code[pos + insn];
-                ++insn;
-                const std::uint8_t mod = (modrm >> 6) & 3;
-                const std::uint8_t rm  = modrm & 7;
-                if (mod == 0) return 0; // rip-relative / absolute: not relocatable
-                if (mod != 3 && rm == 4) ++insn;      // SIB
-                if (mod == 1) ++insn;                 // disp8
-                else if (mod == 2) insn += 4;         // disp32
-                break;
-            }
-
-            // Group 1: r/m, imm (ADD/SUB/CMP/AND/... imm8/imm32)
-            case 0x81: case 0x83: {
-                if (pos + insn >= avail) return 0;
-                const std::uint8_t modrm = code[pos + insn];
-                ++insn;
-                const std::uint8_t mod = (modrm >> 6) & 3;
-                const std::uint8_t rm  = modrm & 7;
-                if (mod == 0) return 0;
-                if (mod != 3 && rm == 4) ++insn;      // SIB
-                if (mod == 1) ++insn;
-                else if (mod == 2) insn += 4;
-                insn += (b == 0x81) ? 4 : 1;          // imm32 / imm8
-                break;
-            }
-
-            default:
-                return 0; // unknown -> refuse to relocate
-        }
-
-        pos += insn;
-        if (pos > avail) return 0;
-    }
-    return pos;
-}
-
-// Write an absolute 12-byte jump "mov rax, imm64; jmp rax" at `dst` -> `target`.
-void write_abs_jump(std::uint8_t* dst, const void* target) noexcept {
-    dst[0] = 0x48; dst[1] = 0xB8;
-    std::memcpy(dst + 2, &target, 8);
-    dst[10] = 0xFF; dst[11] = 0xE0;
-}
-
-// Install detour on `target` -> `hook`. On success writes the trampoline into
-// *out_tramp BEFORE patching the target (so the hook never observes a null
-// original) and returns true; returns false on failure (target left untouched).
-bool install_detour(std::byte* target, void* hook, const char* what, void** out_tramp) noexcept {
-    if (!target || !hook) return false;
-    std::uint8_t prologue[32]{};
-    if (!is_readable(target, sizeof(prologue))) {
-        log::warn("[setparam] {}: target 0x{:X} not readable, skip",
-                  what, reinterpret_cast<std::uintptr_t>(target));
-        return false;
-    }
-    std::memcpy(prologue, target, sizeof(prologue));
-
-    const std::size_t n = safe_prologue_len(prologue, sizeof(prologue), 12);
-    if (n == 0) {
-        // Dump the first bytes so the next iteration can hand-write a pattern.
-        char hex[64]{};
-        std::size_t h = 0;
-        for (std::size_t i = 0; i < 16 && h < sizeof(hex) - 4; ++i)
-            h += std::snprintf(hex + h, sizeof(hex) - h, "%02X ", prologue[i]);
-        log::warn("[setparam] {}: prologue not relocatable, skip (bytes: {})", what, hex);
-        return false;
-    }
-
-    // Trampoline: saved prologue + absolute jump back to target+n.
-    void* tramp = VirtualAlloc(nullptr, n + 12, MEM_COMMIT | MEM_RESERVE,
-                               PAGE_EXECUTE_READWRITE);
-    if (!tramp) {
-        log::warn("[setparam] {}: VirtualAlloc trampoline failed, skip", what);
-        return false;
-    }
-    std::uint8_t* t = static_cast<std::uint8_t*>(tramp);
-    std::memcpy(t, prologue, n);
-    write_abs_jump(t + n, target + n);
-    FlushInstructionCache(GetCurrentProcess(), tramp, n + 12);
-
-    // Publish the trampoline BEFORE patching the live function.
-    if (out_tramp) *out_tramp = tramp;
-
-    // Overwrite the function prologue with the absolute jump to the hook.
-    DWORD old = 0;
-    if (!VirtualProtect(target, 12, PAGE_EXECUTE_READWRITE, &old)) {
-        log::warn("[setparam] {}: VirtualProtect failed, skip", what);
-        VirtualFree(tramp, 0, MEM_RELEASE);
-        if (out_tramp) *out_tramp = nullptr;
-        return false;
-    }
-    std::uint8_t jmp[12];
-    write_abs_jump(jmp, hook);
-    std::memcpy(target, jmp, 12);
-    VirtualProtect(target, 12, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), target, 12);
-
-    log::info("[setparam] {} hooked: fn=0x{:X} -> hook=0x{:X} (relocated {} bytes)",
-              what, reinterpret_cast<std::uintptr_t>(target),
-              reinterpret_cast<std::uintptr_t>(hook), n);
-    return true;
-}
-
-// Bounded, readability-checked read of a C string into a std::string_view.
-std::string_view safe_cstr(const char* s, std::size_t max_len = 128) noexcept {
-    if (!s) return {};
-    std::size_t n = 0;
-    while (n < max_len && is_readable(s + n, 1) && s[n] != '\0') ++n;
-    return {s, n};
-}
-
-bool interesting_name(std::string_view name) noexcept {
-    return name.find("ockpit") != std::string_view::npos  || // Cockpit
-           name.find("amera")  != std::string_view::npos  || // Camera
-           name.find("nterior")!= std::string_view::npos  || // Interior
-           name.find("xterior")!= std::string_view::npos  || // Exterior
-           name.find("istener")!= std::string_view::npos  || // Listener
-           name.find("oof")     != std::string_view::npos  || // Roof
-           name.find("oppler")  != std::string_view::npos;    // Doppler
-}
-
-// ---- hooks ----
-std::uint32_t hook_set_param_by_name(void* sys, const char* name, float value,
-                                     bool ignore_seek) noexcept {
-    const std::uint64_t total = g_by_name_total.fetch_add(1, std::memory_order_relaxed) + 1;
-    const std::string_view sv = safe_cstr(name);
-    if (interesting_name(sv)) {
-        log::info("[setparam] NAME '{}' = {:.4f}", sv, value);
-    } else if ((total & 0x3FF) == 0) { // sample every 1024 non-interesting calls
-        log::info("[setparam] (sampled {}) NAME '{}' = {:.4f}", total, sv, value);
-    }
-    return reinterpret_cast<SetParamByNameFn>(g_tramp_name)(sys, name, value, ignore_seek);
-}
-
-std::uint32_t hook_set_param_by_id(void* sys, std::uint64_t id, float value,
-                                   bool ignore_seek) noexcept {
-    const std::uint64_t total = g_by_id_total.fetch_add(1, std::memory_order_relaxed) + 1;
-    if ((total & 0xFFF) == 0) { // sample every 4096 (id has no name here)
-        log::info("[setparam] BYID id={:08X}:{:08X} value={:.4f} [total {}]",
-                  static_cast<unsigned>(id & 0xFFFFFFFFu),
-                  static_cast<unsigned>(id >> 32), value, total);
-    }
-    return reinterpret_cast<SetParamByIDFn>(g_tramp_id)(sys, id, value, ignore_seek);
-}
-
-} // namespace
-
-namespace {
-// Resolve a Studio method by anchor, filtering the shared dispatch function and
-// LOGGING every candidate (address + prologue). Returns the "real" candidates.
-// If it returns exactly one, that is the hook target; otherwise the caller logs
-// the ambiguity and skips (the dumped prologues let the next iteration pick).
-constexpr std::uint8_t kDispatchPrologue[8] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56, 0x57};
-
-std::vector<std::byte*> resolve_and_log(const PEImage& img, std::string_view anchor) {
+// Resolve a Studio method to a unique address, filtering the dispatch function.
+// Returns nullptr when there is not exactly one real candidate.
+std::byte* resolve_unique(const PEImage& img, std::string_view anchor) {
     const auto cands = scout_anchor(img, anchor);
-    std::vector<std::byte*> real;
-    log::info("[setparam] '{}' -> {} raw candidate(s):", anchor, cands.size());
+    std::byte* real = nullptr;
+    int count = 0;
     for (auto* fn : cands) {
         std::uint8_t pre[8]{};
         const bool rd = is_readable(fn, sizeof(pre));
         if (rd) std::memcpy(pre, fn, sizeof(pre));
-        const bool dispatch = rd && std::memcmp(pre, kDispatchPrologue, sizeof(pre)) == 0;
-        char hex[64]{};
-        std::size_t h = 0;
-        for (std::size_t i = 0; i < 16 && h < sizeof(hex) - 4; ++i) {
-            std::uint8_t b = 0;
-            if (!is_readable(fn + i, 1)) break;
-            std::memcpy(&b, fn + i, 1);
-            h += std::snprintf(hex + h, sizeof(hex) - h, "%02X ", b);
-        }
-        log::info("[setparam]   0x{:X} prologue=[{}]{}",
-                  reinterpret_cast<std::uintptr_t>(fn), hex, dispatch ? "  [DISPATCH]" : "");
-        if (!dispatch) real.push_back(fn);
+        if (rd && std::memcmp(pre, kDispatch, sizeof(pre)) == 0) continue;
+        real = fn;
+        ++count;
+    }
+    if (count != 1) {
+        log::warn("[setparam] '{}' -> {} real candidate(s) (need 1)", anchor, count);
+        return nullptr;
     }
     return real;
 }
 
-// Hook the first (and expected only) candidate; logs whether it was ambiguous.
-void hook_if_unique(std::vector<std::byte*>& cands, const char* what,
-                    void* hook_fn, void** out_tramp) {
-    if (cands.empty()) {
-        log::warn("[setparam] {}: no real candidate (all were dispatch)", what);
-        return;
+// Every 8-byte slot in a readable image section that holds `fn` (candidate
+// vtable entries / pointer tables referencing the function).
+std::vector<std::byte*> find_slots(const PEImage& img, std::byte* fn) {
+    std::vector<std::byte*> slots;
+    if (!fn) return slots;
+    for (const auto& sec : img.sections) {
+        if (!sec.readable() || sec.end <= sec.start + 8) continue;
+        for (std::byte* p = sec.start; p + 8 <= sec.end; p += 8) {
+            std::byte* v{};
+            std::memcpy(&v, p, 8);
+            if (v == fn) slots.push_back(p);
+        }
     }
-    if (cands.size() > 1) {
-        log::warn("[setparam] {}: {} real candidates -> NOT hooking (ambiguous)", what, cands.size());
-        return;
-    }
-    install_detour(cands[0], hook_fn, what, out_tramp);
+    return slots;
 }
+
+// True if `p` looks like a code pointer into the image's .text (used to confirm
+// a slot is a vtable entry surrounded by other function pointers).
+bool is_text_ptr(const PEImage& img, const std::byte* p) noexcept {
+    return p >= img.text && p < img.text_end;
+}
+
+// Overwrite an 8-byte slot (make it writable, write, restore protection).
+bool patch_slot(std::byte* slot, void* hook) noexcept {
+    if (!slot || !hook) return false;
+    DWORD old = 0;
+    if (!VirtualProtect(slot, 8, PAGE_READWRITE, &old)) return false;
+    std::memcpy(slot, &hook, 8);
+    VirtualProtect(slot, 8, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), slot, 8);
+    return true;
+}
+
+// Dedupe cache: log an (id, value) pair only on first sight or value change, so
+// a stationary car does not flood the log. Not thread-safe on purpose (probe
+// only); worst case a change is logged twice.
+constexpr int kSeenCap = 128;
+struct Seen { std::uint64_t id; float last; bool used; };
+Seen g_seen[kSeenCap]{};
+
+std::uint32_t hook_set_param_by_id(void* sys, std::uint64_t id, float value,
+                                   bool ignore_seek) noexcept {
+    bool changed = false;
+    int empty = -1;
+    for (int i = 0; i < kSeenCap; ++i) {
+        if (g_seen[i].used && g_seen[i].id == id) {
+            changed = (value > g_seen[i].last + 0.0005f) ||
+                      (value < g_seen[i].last - 0.0005f);
+            g_seen[i].last = value;
+            empty = -2; // found
+            break;
+        }
+        if (!g_seen[i].used && empty < 0) empty = i;
+    }
+    if (empty >= 0) { // new id
+        g_seen[empty].used = true;
+        g_seen[empty].id = id;
+        g_seen[empty].last = value;
+        changed = true;
+    }
+    if (changed) {
+        log::info("[setparam] id={:08X}:{:08X} = {:.4f}",
+                  static_cast<unsigned>(id & 0xFFFFFFFFu),
+                  static_cast<unsigned>(id >> 32), value);
+    }
+    return g_orig_by_id(sys, id, value, ignore_seek);
+}
+
 } // namespace
 
 void install_studio_param_hooks(const PEImage& img) noexcept {
     if (!img.valid()) { log::warn("[setparam] image invalid, skip"); return; }
-    log::info("[setparam] ===== studio parameter hook install start =====");
+    log::info("[setparam] ===== studio parameter hook install (vtable patch) =====");
 
-    auto by_name = resolve_and_log(img, "System::setParameterByName");
-    auto by_id   = resolve_and_log(img, "System::setParameterByID");
+    std::byte* by_id = resolve_unique(img, "System::setParameterByID");
+    if (!by_id) {
+        log::warn("[setparam] setParameterByID not uniquely resolved -> not hooking");
+    } else {
+        const auto slots = find_slots(img, by_id);
+        log::info("[setparam] setParameterByID=0x{:X} -> {} slot(s) in image",
+                  reinterpret_cast<std::uintptr_t>(by_id), slots.size());
+        for (auto* s : slots)
+            log::info("[setparam]   slot 0x{:X}", reinterpret_cast<std::uintptr_t>(s));
 
-    hook_if_unique(by_name, "setParameterByName",
-                   reinterpret_cast<void*>(&hook_set_param_by_name), &g_tramp_name);
-    hook_if_unique(by_id, "setParameterByID",
-                   reinterpret_cast<void*>(&hook_set_param_by_id), &g_tramp_id);
+        std::byte* chosen = nullptr;
+        if (slots.size() == 1) {
+            // Confirm it is a vtable entry: at least one adjacent 8-byte word is
+            // also a code pointer (a vtable is a contiguous run of function ptrs).
+            std::byte* n1 = nullptr;
+            std::byte* n2 = nullptr;
+            if (is_readable(slots[0] - 8, 8)) std::memcpy(&n1, slots[0] - 8, 8);
+            if (is_readable(slots[0] + 8, 8)) std::memcpy(&n2, slots[0] + 8, 8);
+            if (is_text_ptr(img, n1) || is_text_ptr(img, n2))
+                chosen = slots[0];
+            else
+                log::warn("[setparam] slot neighbours are not code ptrs -> not a vtable, skip");
+        }
 
-    log::info("[setparam] ===== install done (byName={} byId={}) =====",
-              g_tramp_name ? "hooked" : "skipped",
-              g_tramp_id ? "hooked" : "skipped");
+        if (chosen) {
+            g_orig_by_id = reinterpret_cast<SetParamByIDFn>(by_id); // original, unpatched
+            if (patch_slot(chosen, reinterpret_cast<void*>(&hook_set_param_by_id)))
+                log::info("[setparam] setParameterByID HOOKED via vtable slot 0x{:X}",
+                          reinterpret_cast<std::uintptr_t>(chosen));
+            else
+                log::warn("[setparam] setParameterByID vtable patch failed");
+        } else {
+            log::warn("[setparam] setParameterByID: not hooking (ambiguous/unconfirmed slot)");
+        }
+    }
+
+    // setParameterByName has 3 real candidates in this build (overloads) — log
+    // them read-only for a future attempt, do not hook.
+    {
+        const auto cands = scout_anchor(img, "System::setParameterByName");
+        log::info("[setparam] setParameterByName -> {} candidate(s) (read-only):", cands.size());
+        for (auto* fn : cands) {
+            std::uint8_t pre[8]{};
+            const bool rd = is_readable(fn, sizeof(pre));
+            if (rd) std::memcpy(pre, fn, sizeof(pre));
+            const bool dispatch = rd && std::memcmp(pre, kDispatch, sizeof(pre)) == 0;
+            log::info("[setparam]   0x{:X}{}",
+                      reinterpret_cast<std::uintptr_t>(fn), dispatch ? "  [DISPATCH]" : "");
+        }
+    }
+
+    log::info("[setparam] ===== install done (byId={}) =====",
+              g_orig_by_id ? "hooked" : "skipped");
 }
 
 } // namespace fh6r::fmod
-
