@@ -66,6 +66,7 @@ endif()
 
 target_link_libraries(version PRIVATE
   ole32 uuid ksuser avrt ws2_32
+  windowsapp
 )
 
 set_target_properties(version PROPERTIES OUTPUT_NAME version PREFIX "")
