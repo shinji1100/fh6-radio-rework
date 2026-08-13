@@ -238,17 +238,80 @@ std::byte* read_handle_from_site(std::byte* site) noexcept {
     return studio;
 }
 
+// Recognize the two-level deref chain at a getCoreSystem() call site:
+//   mov rcx, [rip+G]       ; rcx = *(G) = AudioManager (48 8B 0D disp32)
+//   mov rcx, [rcx+slot]    ; rcx = *(AudioManager+slot) = Studio System (48 8B 89 disp32)
+//   call getCoreSystem
+// This is self-contained (the RIP-relative load gives the global directly), so
+// it does not need to trace the register provenance like the create() path.
+// Returns the Studio System pointer, or nullptr.
+std::byte* read_studio_via_getcore(std::byte* site) noexcept {
+    for (int back = 1; back <= 40; ++back) {
+        std::byte* q = site - back;
+        if (q < site - 48) break;
+        // "48 8B 89 disp32" = mov rcx, [rcx+disp32]
+        if (q[0] != std::byte{0x48} || q[1] != std::byte{0x8B} || q[2] != std::byte{0x89})
+            continue;
+        const std::int32_t slot = read_disp32(q + 3);
+        // The preceding "48 8B 0D disp32" = mov rcx, [rip+disp32] (the global load).
+        std::byte* prev = q - 7;
+        if (prev < site - 48) continue;
+        if (prev[0] != std::byte{0x48} || prev[1] != std::byte{0x8B} || prev[2] != std::byte{0x0D})
+            continue;
+        const std::int32_t gdisp = read_disp32(prev + 3);
+        std::byte* G = prev + 7 + gdisp;
+
+        std::byte* audio = nullptr;
+        if (!safe_read(G, audio) || !audio) continue;
+        std::byte* studio = nullptr;
+        if (!safe_read(audio + slot, studio)) continue;
+        log::info("[studio-system]   getCoreSystem pattern: G=0x{:X} audio=0x{:X} slot=+0x{:X} studio=0x{:X}",
+                  reinterpret_cast<std::uintptr_t>(G),
+                  reinterpret_cast<std::uintptr_t>(audio), slot,
+                  reinterpret_cast<std::uintptr_t>(studio));
+        return studio;
+    }
+    return nullptr;
+}
+
 } // namespace
 
 std::byte* locate_studio_system_handle(const PEImage& img) noexcept {
     if (!img.valid()) return nullptr;
+
+    // Preferred path: the getCoreSystem() call site carries a self-contained
+    // two-level deref (mov rcx,[rip+G]; mov rcx,[rcx+slot]), no provenance trace
+    // needed. Scan its xrefs first.
+    std::byte* get_core_fn = resolve_studio_anchor(img, "System::getCoreSystem");
+    if (get_core_fn) {
+        for (std::byte* p = img.text; p + 5 <= img.text_end; ++p) {
+            if (p[0] != std::byte{0xE8}) continue;
+            std::int32_t d = 0; std::memcpy(&d, p + 1, 4);
+            if (p + 5 + d != get_core_fn) continue;
+            log::info("[studio-system] getCoreSystem E8 xref at RVA 0x{:X}", static_cast<std::uintptr_t>(p - img.base));
+            dump_hex(p - 48, 48, "ctx");
+            std::byte* h = read_studio_via_getcore(p);
+            if (h) return h;
+        }
+        for (std::byte* p = img.text; p + 6 <= img.text_end; ++p) {
+            if (p[0] != std::byte{0xFF} || p[1] != std::byte{0x15}) continue;
+            std::int32_t d = 0; std::memcpy(&d, p + 2, 4);
+            std::byte* slot_p = p + 6 + d;
+            std::byte* target = nullptr;
+            if (!safe_read(slot_p, target) || target != get_core_fn) continue;
+            log::info("[studio-system] getCoreSystem FF15 xref at RVA 0x{:X}", static_cast<std::uintptr_t>(p - img.base));
+            dump_hex(p - 48, 48, "ctx");
+            std::byte* h = read_studio_via_getcore(p);
+            if (h) return h;
+        }
+    }
+
+    // Fallback: trace the create() call site's RCX source (lea [rsi+0x4C918]).
     std::byte* create_fn = resolve_studio_anchor(img, "System::create");
     if (!create_fn) {
         log::info("[studio-system] System::create not uniquely resolved -> cannot locate handle");
         return nullptr;
     }
-
-    // Pass 1: E8 rel32 direct calls.
     for (std::byte* p = img.text; p + 5 <= img.text_end; ++p) {
         if (p[0] != std::byte{0xE8}) continue;
         std::int32_t d = 0; std::memcpy(&d, p + 1, 4);
@@ -258,8 +321,6 @@ std::byte* locate_studio_system_handle(const PEImage& img) noexcept {
         std::byte* h = read_handle_from_site(p);
         if (h) return h;
     }
-
-    // Pass 2: FF 15 [rip+disp32] RIP-indirect calls (via function pointer).
     for (std::byte* p = img.text; p + 6 <= img.text_end; ++p) {
         if (p[0] != std::byte{0xFF} || p[1] != std::byte{0x15}) continue;
         std::int32_t d = 0; std::memcpy(&d, p + 2, 4);
