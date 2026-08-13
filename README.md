@@ -80,6 +80,8 @@ dashboard_port=8420
 
 如果“捕获运行中”但 DSP 未接入，先在 FH6 中切换一次电台。如果 DSP 已接入但 buffer 长期 0，检查 QQ 音乐和控制台是否选择了同一个播放设备。
 
+要自动确认当前 Radio 的 FMOD 2D/3D、stream 和直接 Studio Event 身份，请看 [RADIO_ACOUSTICS_DIAGNOSTIC.md](RADIO_ACOUSTICS_DIAGNOSTIC.md)。检测器会在每次游戏进程首次找到 active Streamer Mode stream 时运行一次。
+
 ## 构建
 
 需要 Windows x64、CMake 3.24+、Visual Studio 2022 C++ 工具链。

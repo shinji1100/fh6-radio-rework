@@ -60,7 +60,7 @@ void probe_radio_acoustics(const PEImage& img, const RadioInstance& radio,
     read_qword(radio.radio_stream, 0x10, wrapper_sound);
     read_qword(radio.radio_stream, 0x18, wrapper_studio);
     read_qword(radio.radio_stream, 0x20, wrapper_channel);
-    log::info("[radio-acoustics] wrapper stream=0x{:X} sound_handle=0x{:X} studio_handle=0x{:X} channel_handle=0x{:X}",
+    log::info("[radio-acoustics] wrapper stream=0x{:X} event_or_sound_handle=0x{:X} studio_handle=0x{:X} channel_handle=0x{:X}",
               reinterpret_cast<std::uintptr_t>(radio.radio_stream), wrapper_sound,
               wrapper_studio, wrapper_channel);
 
@@ -81,9 +81,8 @@ void probe_radio_acoustics(const PEImage& img, const RadioInstance& radio,
         });
     }
     const auto discovered_sound = reinterpret_cast<std::uint64_t>(radio.fmod_sound);
-    log::info("[radio-acoustics] Channel::getCurrentSound rc={} sound=0x{:X} seh_ok={} discovery_match={} packed_handle=0x{:X}",
-              current_rc, current_sound, current_ok,
-              current_rc == 0 && current_sound == discovered_sound, wrapper_sound);
+    log::info("[radio-acoustics] Channel::getCurrentSound rc={} sound=0x{:X} seh_ok={} radio_discovery_object=0x{:X} packed_handle=0x{:X}",
+              current_rc, current_sound, current_ok, discovered_sound, wrapper_sound);
 
     std::uint32_t mode = 0;
     std::uint32_t mode_rc = ~0u;
@@ -117,7 +116,7 @@ void probe_radio_acoustics(const PEImage& img, const RadioInstance& radio,
     std::uint64_t fmod_object_word = 0;
     if (radio.fmod_sound) read_qword(radio.fmod_sound, 0x08, fmod_object_word);
     const std::array candidates{
-        HandleCandidate{"stream+0x10(sound)", wrapper_sound},
+        HandleCandidate{"stream+0x10(event-or-sound)", wrapper_sound},
         HandleCandidate{"stream+0x18(studio)", wrapper_studio},
         HandleCandidate{"stream+0x20(channel)", wrapper_channel},
         HandleCandidate{"fmod_sound+0x08", fmod_object_word},
@@ -142,6 +141,9 @@ void probe_radio_acoustics(const PEImage& img, const RadioInstance& radio,
         }
     }
 
+    bool direct_event_proven = false;
+    bool direct_event_3d = false;
+    bool direct_event_stream = false;
     if (event_matches == 1 && get_description && is_3d && is_stream) {
         std::uint64_t input = event_handle;
         std::uint64_t description = 0;
@@ -162,8 +164,11 @@ void probe_radio_acoustics(const PEImage& img, const RadioInstance& radio,
                   event_handle, description, desc_ok, rc_3d, three_d, call_3d,
                   rc_stream, streaming, call_stream);
         if (call_3d && call_stream && rc_3d == 0 && rc_stream == 0) {
+            direct_event_proven = true;
+            direct_event_3d = three_d != 0;
+            direct_event_stream = streaming != 0;
             log::info("[radio-acoustics] direct Radio Event identity -> CONFIRMED is3D={} isStream={} [PROVEN]",
-                      three_d != 0, streaming != 0);
+                      direct_event_3d, direct_event_stream);
         }
     } else if (event_matches == 0) {
         log::info("[radio-acoustics] no EventInstance among verified direct wrapper handle fields; Core mode result remains authoritative for the injected stream (not a global absence proof)");
@@ -171,14 +176,22 @@ void probe_radio_acoustics(const PEImage& img, const RadioInstance& radio,
         log::warn("[radio-acoustics] {} EventInstance-looking handles; refusing ambiguous identity", event_matches);
     }
 
-    if (current_ok && current_rc == 0 && current_sound == discovered_sound &&
-        mode_ok && mode_rc == 0) {
-        log::info("[radio-acoustics] DECISION: active injected Radio sound is {} {} [PROVEN]; {}",
-                  (mode & kMode3D) ? "3D" : ((mode & kMode2D) ? "2D" : "dimension-unknown"),
-                  (mode & kCreateStream) ? "STREAM" : "SAMPLE",
-                  (mode & kMode3D)
-                      ? "native 3D routing remains a candidate"
-                      : "use the custom cabin DSP for interior/exterior acoustics");
+    if (current_ok && current_rc == 0 && current_sound && mode_ok && mode_rc == 0) {
+        const char* dimension = (mode & kMode3D) ? "3D" : ((mode & kMode2D) ? "2D" : "dimension-unknown");
+        const char* storage = (mode & kCreateStream) ? "STREAM" : "SAMPLE";
+        if (direct_event_proven) {
+            log::info("[radio-acoustics] DECISION: active Core Sound={} {} [PROVEN]; direct Studio Event is3D={} isStream={} [PROVEN]; {}",
+                      dimension, storage, direct_event_3d, direct_event_stream,
+                      (mode & kMode3D)
+                          ? "native 3D routing remains a candidate"
+                          : "use the custom cabin DSP for interior/exterior acoustics");
+        } else {
+            log::info("[radio-acoustics] DECISION: active Core Sound={} {} [PROVEN]; direct Studio Event identity unresolved; {}",
+                      dimension, storage,
+                      (mode & kMode3D)
+                          ? "native 3D routing remains a candidate"
+                          : "use the custom cabin DSP for interior/exterior acoustics");
+        }
     }
 
     log::info("[radio-acoustics] ===== done =====");

@@ -420,3 +420,36 @@ cmake --build build --config Release --parallel
 5. **然后修改**:围绕 §11 P1 重建 bank/event API 的 callable 解析,再枚举 active event 并判断 Radio 是否 3D。`locate_studio_system_handle` 已完成,除非新 build 漂移,不要重写。
 
 > 完成后把新的逆向发现追加到 §12 证据表,更新 §2 状态。
+
+---
+
+## 15. 2026-08-13 Radio 声学身份闭环（最新状态）
+
+旧的 P1 “必须先枚举全部 bank/event 才能判断 Radio 是否 3D”已被一条更短、身份更强的 active-stream 路径替代并完成：从唯一 active `RadioStreamFmod` 直接读取 packed handles，再用有真实调用 provenance 的 Studio/Core getter 验证。
+
+### 已实现
+
+- 新增 `radio_acoustics_probe`，在每个游戏进程首次发现 active Streamer Mode stream 时自动运行一次。
+- `stream + 0x18` 的 Studio System handle 与 `studio_system_snapshot()` 相等：`MATCH [PROVEN]`。
+- `stream + 0x20` 是可调用 `Channel::getCurrentSound` 的 Core Channel handle。
+- `Channel::getCurrentSound` 返回当前 Core Sound；`Sound::getMode` 实测 `0x0003008A`，即 `is2D=true`、`is3D=false`、`createStream=true`。
+- `stream + 0x10` 通过 `EventInstance::getPlaybackState` 和 getDescription thunk 双重验证为直接 EventInstance packed handle；其 EventDescription 返回 `is3D=false`、`isStream=false`。
+- 所有新 getter 调用均有 SEH 保护；候选身份不唯一时拒绝下结论。
+
+### 实机证据（2026-08-13 18:48:08）
+
+```text
+[radio-acoustics] wrapper Studio handle 0x1FFF1F vs verified 0x1FFF1F -> MATCH [PROVEN]
+[radio-acoustics] Channel::getCurrentSound rc=0 sound=0x1724FE48E28 seh_ok=true ...
+[radio-acoustics] Sound::getMode rc=0 mode=0x0003008A is2D=true is3D=false createStream=true
+[radio-acoustics] EventInstance=0x37B000 description=0x37A800 desc_ok=true is3D_rc=0 is3D=0 ... isStream_rc=0 isStream=0 ...
+[radio-acoustics] direct Radio Event identity -> CONFIRMED is3D=false isStream=false [PROVEN]
+```
+
+### 结论与下一步
+
+**架构决定已完成**：插件接管的 active Core Sound 是 2D stream，直接 Radio Studio Event 也不是 3D Event。因此下一条实现主线是把现有 `cabin_dsp.cpp` 接入 `DSPBridge::read_callback`，用插件自己的车内/车外状态和滤波/卷积实现座舱声学；不再把全 bank 枚举作为该决定的前置条件。
+
+仍须保持证据边界：这只证明当前 active Radio stream 及其直接 Event，不证明整个 FH6 bank 中不存在其他 3D Music/Radio 资源。
+
+用户操作说明见 `RADIO_ACOUSTICS_DIAGNOSTIC.md`。
