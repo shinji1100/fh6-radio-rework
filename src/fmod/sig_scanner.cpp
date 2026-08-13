@@ -1,5 +1,6 @@
 #include "fh6r/fmod/sig_scanner.hpp"
 #include "fh6r/log.hpp"
+#include "fh6r/safe_mem.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -136,5 +137,26 @@ std::byte* resolve_by_anchor_unique(const PEImage& img, std::string_view anchor)
         return nullptr;
     }
     return cands.front();
+}
+
+std::byte* resolve_studio_anchor(const PEImage& img, std::string_view anchor) noexcept {
+    const auto cands = scout_anchor(img, anchor);
+    // This build references every Studio name string from a shared logging /
+    // dispatch function whose prologue starts 48 89 5C 24 18 55 56 57. Filter
+    // it out and keep the remaining (real) candidate(s).
+    constexpr std::uint8_t kDispatch[8] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56, 0x57};
+    std::vector<std::byte*> real;
+    for (auto* fn : cands) {
+        std::uint8_t pre[8]{};
+        if (is_readable(fn, sizeof(pre))) std::memcpy(pre, fn, sizeof(pre));
+        if (std::memcmp(pre, kDispatch, sizeof(kDispatch)) == 0) continue;
+        real.push_back(fn);
+    }
+    if (real.size() != 1) {
+        log::warn("[sig] studio anchor '{}' candidates={} (after dispatch filter), need 1",
+                  anchor, real.size());
+        return nullptr;
+    }
+    return real.front();
 }
 } // namespace fh6r::fmod

@@ -20,4 +20,10 @@ std::vector<std::byte*> scout_anchor(const PEImage& img, std::string_view anchor
 // single LEA-referencing function, so no byte pattern (which would be
 // non-unique across FMOD's shared prologues) is needed.
 std::byte* resolve_by_anchor_unique(const PEImage& img, std::string_view anchor) noexcept;
+
+// Resolve a FMOD Studio method by anchor, filtering out the shared logging/
+// dispatch function that references every Studio name string (prologue
+// "48 89 5C 24 18 55 56 57"). Returns the unique remaining candidate, or
+// nullptr when none/ambiguous remains.
+std::byte* resolve_studio_anchor(const PEImage& img, std::string_view anchor) noexcept;
 } // namespace fh6r::fmod

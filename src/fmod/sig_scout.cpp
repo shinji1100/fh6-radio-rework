@@ -45,6 +45,9 @@ constexpr Desired kLowLevel[] = {
 constexpr Desired kStudio[] = {
     {"System::getParameterDescriptionList",  "global param list"},
     {"System::getParameterDescriptionCount", "global param count"},
+    {"System::getParameterByID",             "get param by id"},
+    {"System::getParameterByName",           "get param by name"},
+    {"System::getParameterByNameWithLabel",  "get param by name+label"},
     {"System::setListenerAttributes",        "set listener attrs"},
     {"System::setNumListeners",             "set num listeners"},
     {"System::setListenerWeight",           "set listener weight"},

@@ -5,6 +5,7 @@
 #include "fh6r/fmod/dsp_bridge.hpp"
 #include "fh6r/fmod/pe_image.hpp"
 #include "fh6r/fmod/sig_scout.hpp"
+#include "fh6r/fmod/studio_probe.hpp"
 #include "fh6r/http/http_server.hpp"
 #include "fh6r/log.hpp"
 #include "fh6r/wasapi_capture.hpp"
@@ -56,6 +57,11 @@ void run_bridge(HMODULE self) noexcept {
         // next iteration gets confirmed byte patterns for the cabin-acoustics
         // state enumerator. Read-only, runs once at startup.
         if (image.valid()) fmod::scout_apis(image);
+
+        // Phase 1 (Studio path): locate the FMOD Studio System and resolve the
+        // parameter getters, so the next iteration can enumerate global
+        // parameters and find the interior/exterior signal. Read-only.
+        if (image.valid()) fmod::studio_scout(image);
 
         fmod::DSPBridge dsp{ring, fns};
         dsp.set_gain(cfg.gain);
