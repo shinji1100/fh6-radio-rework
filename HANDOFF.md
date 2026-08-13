@@ -453,3 +453,12 @@ cmake --build build --config Release --parallel
 仍须保持证据边界：这只证明当前 active Radio stream 及其直接 Event，不证明整个 FH6 bank 中不存在其他 3D Music/Radio 资源。
 
 用户操作说明见 `RADIO_ACOUSTICS_DIAGNOSTIC.md`。
+
+### 当前交付基线
+
+- 功能 commit：`bfa66cb`。
+- GitHub Actions run：`31692905803`；`portable-tests` 与 `windows-x64` 均通过。
+- artifact id：`9178144274`。
+- 已部署：`D:\Forza Horizon 6\version.dll`。
+- 部署 DLL SHA256：`8AA0788EBD886EBB792E74907336EC952ECCB26B74A5EFDAF4B80B0398587ACC`。
+- 回滚备份：`D:\Forza Horizon 6\fh6-radio-rework\backups\version.dll.before-bfa66cb.20260813-185315.bak`。
