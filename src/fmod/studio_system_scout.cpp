@@ -166,6 +166,12 @@ RcxTrace trace_rcx_addr(std::byte* call_site) noexcept {
         for (int back = 1; back <= 64 && !advanced; ++back) {
             const std::byte* q = pos - back;
             if (q < call_site - 256) break;  // hard backward cap
+            // If the preceding byte is a REX prefix (0x40..0x4F), q sits in the
+            // MIDDLE of an instruction (right after its REX prefix). A byte-wise
+            // backward scan would decode from there and silently drop the r8-r15
+            // extension (e.g. "49 8B CE" would be read as "8B CE" = mov rcx,rsi
+            // instead of mov rcx,r14). Skip such misaligned starts.
+            if ((std::to_integer<std::uint8_t>(q[-1]) & 0xF0) == 0x40) continue;
             Insn insn;
             const int len = decode(q, pos, insn);
             if (len == 0) continue;
@@ -283,16 +289,20 @@ std::byte* locate_studio_system_handle(const PEImage& img) noexcept {
     // two-level deref (mov rcx,[rip+G]; mov rcx,[rcx+slot]), no provenance trace
     // needed. Scan its xrefs first.
     std::byte* get_core_fn = resolve_studio_anchor(img, "System::getCoreSystem");
+    log::info("[studio-system] get_core_fn=0x{:X}", reinterpret_cast<std::uintptr_t>(get_core_fn));
     if (get_core_fn) {
+        int e8_matches = 0;
         for (std::byte* p = img.text; p + 5 <= img.text_end; ++p) {
             if (p[0] != std::byte{0xE8}) continue;
             std::int32_t d = 0; std::memcpy(&d, p + 1, 4);
             if (p + 5 + d != get_core_fn) continue;
+            ++e8_matches;
             log::info("[studio-system] getCoreSystem E8 xref at RVA 0x{:X}", static_cast<std::uintptr_t>(p - img.base));
             dump_hex(p - 48, 48, "ctx");
             std::byte* h = read_studio_via_getcore(p);
             if (h) return h;
         }
+        log::info("[studio-system] getCoreSystem E8 xref matches={}", e8_matches);
         for (std::byte* p = img.text; p + 6 <= img.text_end; ++p) {
             if (p[0] != std::byte{0xFF} || p[1] != std::byte{0x15}) continue;
             std::int32_t d = 0; std::memcpy(&d, p + 2, 4);
