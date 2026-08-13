@@ -2,6 +2,7 @@
 #include "fh6r/fmod/dsp_bridge.hpp"
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -38,7 +39,7 @@ struct AudioStateSnapshot {
 // the game down. The latest snapshot is exposed to the dashboard/diff layer.
 class AudioStateProbe {
 public:
-    explicit AudioStateProbe(fmod::DSPBridge& bridge);
+    explicit AudioStateProbe(fmod::DSPBridge& bridge, std::string data_dir);
     ~AudioStateProbe();
     AudioStateProbe(const AudioStateProbe&) = delete;
     AudioStateProbe& operator=(const AudioStateProbe&) = delete;
@@ -50,6 +51,9 @@ private:
     void sample() noexcept;
 
     fmod::DSPBridge& bridge_;
+    std::string data_dir_;
+    bool reverb_scouted_ = false;
+    int reverb_attempts_ = 0;
     mutable std::mutex mu_;
     AudioStateSnapshot snap_;
     std::jthread thread_;

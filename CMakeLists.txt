@@ -50,6 +50,7 @@ add_library(version SHARED
   src/fmod/sig_scout.cpp
   src/fmod/studio_probe.cpp
   src/fmod/studio_param_hook.cpp
+  src/fmod/cockpit_reverb_scout.cpp
   src/fmod/metadata_injector.cpp
   src/fmod/radio_discovery.cpp
   src/fmod/dsp_bridge.cpp

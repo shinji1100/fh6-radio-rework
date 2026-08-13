@@ -35,6 +35,10 @@ constexpr Desired kLowLevel[] = {
     {"DSP::getType",                       "DSP type"},
     {"DSP::getNumParameters",              "DSP num params"},
     {"DSP::getParameterFloat",             "DSP param float"},
+    {"System::getMasterChannelGroup",      "master channel group"},
+    {"ChannelGroup::getNumGroups",         "group num groups"},
+    {"ChannelGroup::getGroup",             "group get group"},
+    {"DSP::getParameterData",              "DSP param data"},
 };
 
 // Studio API: confirmed present AND LEA-referenced on disk in this build.

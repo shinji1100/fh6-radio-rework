@@ -1,4 +1,5 @@
 #include "fh6r/audio_state_probe.hpp"
+#include "fh6r/fmod/cockpit_reverb_scout.hpp"
 #include "fh6r/log.hpp"
 #include "fh6r/safe_mem.hpp"
 
@@ -6,6 +7,7 @@
 #include <cstdint>
 #include <format>
 #include <string>
+#include <utility>
 
 namespace fh6r {
 namespace {
@@ -14,8 +16,9 @@ constexpr std::int32_t kMaxDSPs = 32;
 constexpr std::int32_t kMaxParams = 16;
 } // namespace
 
-AudioStateProbe::AudioStateProbe(fmod::DSPBridge& bridge)
-    : bridge_{bridge}, thread_{[this](std::stop_token s) { run(s); }} {}
+AudioStateProbe::AudioStateProbe(fmod::DSPBridge& bridge, std::string data_dir)
+    : bridge_{bridge}, data_dir_{std::move(data_dir)},
+      thread_{[this](std::stop_token s) { run(s); }} {}
 
 AudioStateProbe::~AudioStateProbe() {
     thread_.request_stop();
@@ -50,6 +53,15 @@ void AudioStateProbe::sample() noexcept {
         std::scoped_lock lk{mu_};
         snap_ = s;
         return;
+    }
+
+    // One-shot cockpit reverb scout: the FMOD System pointer is only valid
+    // after discovery, so walk the group tree on first attach (up to 3 tries
+    // to ride out a lazily-loaded bank) and dump any convolution-reverb IR.
+    if (!reverb_scouted_ && reverb_attempts_ < 3) {
+        ++reverb_attempts_;
+        if (fmod::scout_cockpit_reverb(fns, sys, data_dir_))
+            reverb_scouted_ = true;
     }
 
     // FMOD 3D listener (pos/vel/forward/up). forward/up flip between cockpit

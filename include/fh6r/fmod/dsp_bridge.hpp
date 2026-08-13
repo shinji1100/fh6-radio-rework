@@ -24,6 +24,11 @@ struct FMODFns {
     using DSPGetType = std::uint32_t (*)(void*, std::int32_t*);
     using DSPGetNumParameters = std::uint32_t (*)(void*, std::int32_t*);
     using DSPGetParameterFloat = std::uint32_t (*)(void*, std::int32_t, float*, char*);
+    // Cockpit reverb scout: channel-group tree traversal + convolution IR read.
+    using SysGetMasterChannelGroup = std::uint32_t (*)(void*, void**);
+    using GroupGetNumGroups = std::uint32_t (*)(void*, std::int32_t*);
+    using GroupGetGroup = std::uint32_t (*)(void*, std::int32_t, void**);
+    using DSPGetParameterData = std::uint32_t (*)(void*, std::int32_t, void**, std::uint32_t*, char*, std::int32_t);
     SystemCreateDSP system_create_dsp = nullptr;
     DSPRelease dsp_release = nullptr;
     AddDSP add_dsp = nullptr;
@@ -36,12 +41,20 @@ struct FMODFns {
     DSPGetType dsp_get_type = nullptr;
     DSPGetNumParameters dsp_get_num_parameters = nullptr;
     DSPGetParameterFloat dsp_get_parameter_float = nullptr;
+    SysGetMasterChannelGroup get_master_channel_group = nullptr;
+    GroupGetNumGroups group_get_num_groups = nullptr;
+    GroupGetGroup group_get_group = nullptr;
+    DSPGetParameterData dsp_get_parameter_data = nullptr;
     std::byte* host_base = nullptr;
     bool ready() const noexcept { return host_base && dsp_release && add_dsp && remove_dsp && resolver && unlock; }
     // Probe APIs are optional to audio injection; present iff each anchor resolved uniquely.
     bool probe_ready() const noexcept {
         return get3d_listener_attrs && get_num_dsps && get_dsp && dsp_get_type &&
                dsp_get_num_parameters && dsp_get_parameter_float;
+    }
+    bool cockpit_reverb_ready() const noexcept {
+        return get_master_channel_group && group_get_num_groups && group_get_group &&
+               get_num_dsps && get_dsp && dsp_get_type && dsp_get_parameter_data;
     }
 };
 bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept;

@@ -74,7 +74,7 @@ void run_bridge(HMODULE self) noexcept {
         dsp.set_gain(cfg.gain);
         dsp.set_native_stereo(cfg.native_stereo);
         fmod::Controller controller{dsp, image};
-        AudioStateProbe probe{dsp};
+        AudioStateProbe probe{dsp, data_dir.string()};
         MemoryDiff memdiff{image};
         http::HttpServer http{cfg.dashboard_port, config, ring, capture, dsp, controller, probe, memdiff};
 
